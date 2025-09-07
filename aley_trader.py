@@ -327,6 +327,41 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
     frame = tk.Frame(notebook)
     frame.pack(fill=tk.BOTH, expand=1)
 
+    # --- Chart container with toolbar on left ---
+    chart_container = tk.Frame(frame, bg=DEEP_SEA_THEME['primary_bg'])
+    chart_container.pack(fill=tk.BOTH, expand=1)
+
+    # Drawing Toolbar (left side of chart)
+    drawing_tools = [
+        ("Trendline", "📈"),
+        ("Horizontal", "━"),
+        ("Vertical", "┃"),
+        ("Fibonacci", "𝑭"),
+        ("Text", "📝"),
+        ("Rectangle", "▭"),
+        ("Ellipse", "◯"),
+        ("Triangle", "△"),
+        ("Freehand", "✏️"),
+        ("Eraser", "🧹"),
+        ("Clear", "❌"),
+        ("Crosshair", "+"),
+        ("Zoom", "🔍")
+    ]
+    toolbar_frame = tk.Frame(chart_container, bg=DEEP_SEA_THEME['secondary_bg'], width=56)
+    toolbar_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 2), pady=2)
+    toolbar_frame.pack_propagate(False)
+    for tool_name, icon in drawing_tools:
+        btn = tk.Button(toolbar_frame, text=icon, width=3, height=1, font=("Segoe UI", 14),
+                       bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary'])
+        btn.pack(side=tk.TOP, pady=3, padx=2)
+
+    # Ensure chart canvas is packed to the right of the toolbar
+    # Find or create the chart canvas after toolbar_frame
+    # Example for candlestick chart:
+    # canvas = FigureCanvasTkAgg(fig, master=chart_container)
+    # canvas.draw()
+    # canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+
     current_timeframe = tk.StringVar(value="1d")
     auto_refresh_enabled = tk.BooleanVar(value=True)
     refresh_interval = 30000  # 30 seconds for auto-refresh
@@ -518,6 +553,185 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                 return empty_df, np.array([99, 101]), np.array([0]), 100, 100
 
     def draw_chart(chart_type="Candlestick"):
+        # --- Drawing Toolbar Placeholder (left side) ---
+        drawing_tools = [
+            ("Trendline", "📈"),
+            ("Horizontal", "━"),
+            ("Vertical", "┃"),
+            ("Fibonacci", "𝑭"),
+            ("Text", "📝"),
+            ("Rectangle", "▭"),
+            ("Ellipse", "◯"),
+            ("Triangle", "△"),
+            ("Freehand", "✏️"),
+            ("Eraser", "🧹"),
+            ("Clear", "❌"),
+            ("Crosshair", "+"),
+            ("Zoom", "🔍")
+        ]
+        toolbar_frame = tk.Frame(frame, bg=DEEP_SEA_THEME['secondary_bg'], width=56)
+        toolbar_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 2), pady=2)
+        toolbar_frame.pack_propagate(False)
+        for tool_name, icon in drawing_tools:
+            btn = tk.Button(toolbar_frame, text=icon, width=3, height=1, font=("Segoe UI", 14),
+                           bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary'])
+            btn.pack(side=tk.TOP, pady=3, padx=2)
+        # --- TradingView-style Drawing Toolbar ---
+        class DrawingToolbar(tk.Frame):
+            TOOL_LIST = [
+                ("trendline", "Trendline", "📈"),
+                ("hline", "Horizontal Line", "━"),
+                ("vline", "Vertical Line", "┃"),
+                ("fibonacci", "Fibonacci", "𝑭"),
+                ("text", "Text Label", "📝"),
+                ("rectangle", "Rectangle", "▭"),
+                ("ellipse", "Ellipse", "◯"),
+                ("triangle", "Triangle", "△"),
+                ("pencil", "Pencil", "✏️"),
+                ("eraser", "Eraser", "🧹"),
+                ("clear", "Clear All", "❌"),
+                ("crosshair", "Crosshair", "+"),
+                ("zoom", "Zoom", "🔍")
+            ]
+
+            def __init__(self, parent, on_tool_select):
+                super().__init__(parent, bg=DEEP_SEA_THEME['secondary_bg'], width=52)
+                self.on_tool_select = on_tool_select
+                self.selected_tool = None
+                self.tool_buttons = {}
+                self.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 2), pady=2)
+                for tool_id, tool_name, icon in self.TOOL_LIST:
+                    btn = tk.Button(self, text=icon, width=3, height=1, font=("Segoe UI", 14),
+                                    bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary'],
+                                    command=lambda t=tool_id: self.select_tool(t))
+                    btn.pack(side=tk.TOP, pady=3, padx=2)
+                    btn.tooltip = tool_name  # For future tooltip support
+                    self.tool_buttons[tool_id] = btn
+
+            def select_tool(self, tool_id):
+                self.selected_tool = tool_id
+                self.on_tool_select(tool_id)
+                for t, btn in self.tool_buttons.items():
+                    btn.config(bg=DEEP_SEA_THEME['info'] if t == tool_id else DEEP_SEA_THEME['surface_bg'])
+
+        # --- Drawing Manager (placeholder for chart interaction logic) ---
+        class DrawingManager:
+            def __init__(self, chart_canvas):
+                self.chart_canvas = chart_canvas
+                self.active_tool = None
+                self.drawings = []  # Store drawing objects
+
+            def set_tool(self, tool_id):
+                self.active_tool = tool_id
+                # Placeholder: integrate with chart_canvas for drawing
+
+            # Placeholder methods for each tool
+            def draw_trendline(self): pass
+            def draw_hline(self): pass
+            def draw_vline(self): pass
+            def draw_fibonacci(self): pass
+            def draw_text(self): pass
+            def draw_rectangle(self): pass
+            def draw_ellipse(self): pass
+            def draw_triangle(self): pass
+            def draw_pencil(self): pass
+            def erase(self): pass
+            def clear_all(self): pass
+            def crosshair(self): pass
+            def zoom(self): pass
+
+        # --- Integrate Toolbar and DrawingManager ---
+        # Find chart canvas (Matplotlib FigureCanvasTkAgg)
+        chart_canvas = None
+        for widget in frame.winfo_children():
+            if hasattr(widget, 'get_tk_widget'):
+                chart_canvas = widget
+                break
+        drawing_manager = DrawingManager(chart_canvas)
+        drawing_toolbar = DrawingToolbar(frame, drawing_manager.set_tool)
+        # --- Drawing Toolbar (TradingView-style) ---
+        class DrawingToolbar(tk.Frame):
+            def __init__(self, parent, on_tool_select):
+                super().__init__(parent, bg=DEEP_SEA_THEME['secondary_bg'], width=48)
+                self.on_tool_select = on_tool_select
+                self.selected_tool = None
+                self.tools = [
+                    ("trendline", "📈"),
+                    ("ray", "➖"),
+                    ("hline", "━"),
+                    ("vline", "┃"),
+                    ("fibonacci", "𝑭"),
+                    ("text", "📝"),
+                    ("rectangle", "▭"),
+                    ("ellipse", "◯"),
+                    ("triangle", "△"),
+                    ("pencil", "✏️"),
+                    ("eraser", "🧹"),
+                    ("clear", "❌"),
+                    ("zoom", "🔍"),
+                    ("crosshair", "+")
+                ]
+                self.tool_buttons = {}
+                self.collapsed = False
+                self.collapse_btn = tk.Button(self, text="⏴", command=self.toggle_collapse, width=2, bg=DEEP_SEA_THEME['surface_bg'])
+                self.collapse_btn.pack(side=tk.TOP, pady=2)
+                self.tools_frame = tk.Frame(self, bg=DEEP_SEA_THEME['secondary_bg'])
+                self.tools_frame.pack(side=tk.TOP, fill=tk.Y, expand=1)
+                for tool, icon in self.tools:
+                    btn = tk.Button(self.tools_frame, text=icon, width=2, height=1, font=("Segoe UI", 14),
+                                    bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary'],
+                                    command=lambda t=tool: self.select_tool(t))
+                    btn.pack(side=tk.TOP, pady=2, padx=2)
+                    self.tool_buttons[tool] = btn
+                self.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 2), pady=2)
+
+            def select_tool(self, tool):
+                self.selected_tool = tool
+                self.on_tool_select(tool)
+                for t, btn in self.tool_buttons.items():
+                    btn.config(bg=DEEP_SEA_THEME['info'] if t == tool else DEEP_SEA_THEME['surface_bg'])
+
+            def toggle_collapse(self):
+                self.collapsed = not self.collapsed
+                if self.collapsed:
+                    self.tools_frame.pack_forget()
+                    self.collapse_btn.config(text="⏵")
+                else:
+                    self.tools_frame.pack(side=tk.TOP, fill=tk.Y, expand=1)
+                    self.collapse_btn.config(text="⏴")
+
+        # Placeholder drawing logic handler
+        class DrawingManager:
+            def __init__(self, canvas):
+                self.canvas = canvas
+                self.active_tool = None
+                # Placeholder for storing drawings
+                self.drawings = []
+
+            def set_tool(self, tool):
+                self.active_tool = tool
+                # TODO: Integrate tool activation logic
+
+            # Placeholder methods for each tool
+            def draw_trendline(self): pass
+            def draw_ray(self): pass
+            def draw_hline(self): pass
+            def draw_vline(self): pass
+            def draw_fibonacci(self): pass
+            def draw_text(self): pass
+            def draw_rectangle(self): pass
+            def draw_ellipse(self): pass
+            def draw_triangle(self): pass
+            def draw_pencil(self): pass
+            def erase(self): pass
+            def clear_all(self): pass
+            def zoom(self): pass
+            def crosshair(self): pass
+            # TODO: Add undo/redo, edit/delete, sync, etc.
+
+        # --- Integrate Drawing Toolbar and Manager ---
+        drawing_manager = DrawingManager(None)  # Pass chart canvas when available
+        drawing_toolbar = DrawingToolbar(frame, drawing_manager.set_tool)
         nonlocal refresh_timer
         
         # Cancel any existing refresh timer
@@ -1726,6 +1940,8 @@ def main_tabbed_chart():
         percent_gain = ((latest_close - prev_close) / prev_close) * 100
         ta_signal = get_ta_signal(symbol)
         rsi_val = get_rsi(symbol)
+        if rsi_val is None:
+            rsi_val = 0
         analysis = get_in_depth_analysis(symbol)
         
         # Create trading interface with the stock data
@@ -1779,6 +1995,9 @@ def main_tabbed_chart():
 
         notebook = ttk.Notebook(main_content, style="TNotebook")
         notebook.pack(fill=tk.BOTH, expand=1, side=tk.LEFT, padx=0, pady=0)
+
+        # Add initial tab for the selected symbol
+        show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gain, ta_signal, rsi_val, analysis, notebook, symbol)
 
         # --- Thin TradingView-style side panel ---
         side_panel_width = 220
@@ -2079,11 +2298,6 @@ def main_tabbed_chart():
             new_rsi = get_rsi(new_symbol)
             new_analysis = get_in_depth_analysis(new_symbol)
             show_chart_with_points(new_symbol, new_ticker, new_prev_close, new_latest_close, new_percent_gain, new_ta_signal, new_rsi, new_analysis, notebook, new_symbol)
-
-    # ...existing code...
-
-        # Add initial tab for the selected symbol
-        show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gain, ta_signal, rsi_val, analysis, notebook, symbol)
 
     # Start with home page
     create_home_page()
