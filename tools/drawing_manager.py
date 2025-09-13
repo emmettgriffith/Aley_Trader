@@ -1,3 +1,5 @@
+import matplotlib.pyplot as plt
+
 class DrawingManager:
     def __init__(self, chart_area):
         self.chart_area = chart_area
