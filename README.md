@@ -2,7 +2,7 @@
 
 A powerful, professional trading application with advanced charting capabilities, technical analysis, and AI-powered insights.
 
-![Aley Trader](https://img.shields.io/badge/Version-2.0-blue?style=for-the-badge)
+![Aley Trader](https://img.shields.io/badge/Version-2.1-blue?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.8+-green?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
 
@@ -11,7 +11,7 @@ A powerful, professional trading application with advanced charting capabilities
 ### 🔥 Core Trading Features
 - **Real-time Market Data** - Live stock prices, volume, and historical data via Yahoo Finance
 - **Advanced Charting** - Multiple timeframes (1m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 1d)
-- **Technical Analysis** - RSI, Bollinger Bands, Volume Profile, and more
+- **Technical Analysis** - RSI, Bollinger Bands, Volume Profile, MACD, VWAP, SMA/EMA overlays
 - **Pre/Post Market Data** - Extended hours trading information
 - **Interactive Charts** - Zoom, pan, and scroll through price history
 
@@ -37,7 +37,8 @@ A powerful, professional trading application with advanced charting capabilities
 ### 🎨 Professional UI
 - **Deep Sea Theme** - Beautiful dark blue color scheme
 - **Responsive Design** - Scales to any screen size
-- **Intuitive Navigation** - Tabbed interface with quick access buttons
+- **Intuitive Navigation** - Tabs for Home, News, Heatmap, Screener, and Charts
+ - **Indicator Persistence** - Remembers your selections per symbol (and a global default) across app restarts
 - **Real-time Updates** - Auto-refresh capabilities with customizable intervals
 
 ## 🚀 Quick Start
@@ -53,8 +54,8 @@ A powerful, professional trading application with advanced charting capabilities
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/emmettgriffith/Lumi_Project.git
-   cd Lumi_Project
+   git clone https://github.com/emmettgriffith/Aley_Trader.git
+   cd Aley_Trader
    ```
 
 2. **Install dependencies**
@@ -84,10 +85,11 @@ A powerful, professional trading application with advanced charting capabilities
 
 ### Navigation
 
-- **Home Page** - Overview with quick tabs and market screeners
-- **Chart Tabs** - Individual stock charts with full technical analysis
-- **Watchlist** - Track your favorite stocks with real-time updates
-- **Settings** - Customize appearance and data preferences
+- **Home** - Startup page in a tab with quick actions (Screener, News, Heatmap, quick “Open” box)
+- **Chart Tabs** - Individual stock charts with full technical analysis; indicator choices persist per symbol
+- **News Flow** - Live headlines with symbol filter and auto‑refresh; double‑click to open
+- **Heatmap** - Color‑coded performance grid for selected universes
+- **Screener** - Scan universes; open or add tickers to watchlist via context menu
 
 ### Chart Controls
 
@@ -151,7 +153,7 @@ TAAPI_KEY=your_taapi_key_here
 ### File Structure
 
 ```
-Lumi_Project/
+Aley_Trader/
 ├── aley_trader.py              # Main application
 ├── overflow_chart.py           # Overflow chart module
 ├── overflow_demo.py            # Standalone overflow chart demo
@@ -161,7 +163,8 @@ Lumi_Project/
 ├── README.md                  # This file
 └── user_data_[username]/      # User-specific data (auto-created)
     ├── watchlist.json         # Personal watchlist
-    └── custom_tabs.json       # Quick tab configuration
+    ├── custom_tabs.json       # Quick tab configuration
+    └── indicator_prefs.json   # Saved indicator selections (per symbol + default)
 ```
 
 ## 🔧 Configuration
@@ -187,6 +190,15 @@ Each user gets their own data directory with:
 - **watchlist.json** - Personal stock watchlist
 - **custom_tabs.json** - Quick access tab configuration
 - **remember_me.dat** - Encrypted login credentials (if enabled)
+- **indicator_prefs.json** - Indicator selections per symbol and a global “_default” profile
+
+### Screener “All US” Setup (optional)
+Place a symbols file in the project (root, `data/`, or `tools/`) to enable a broad US scan:
+- `symbols.txt` or `tickers.txt` (one ticker per line)
+- `nasdaq_screener.csv` (CSV with a `Symbol` column)
+- `symbols.csv` / `tickers.csv` (CSV with `Symbol` or `Ticker` column)
+
+If none is present, the Screener uses a fast Mega‑Caps set.
 
 ## 🎯 Usage Examples
 
