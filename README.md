@@ -2,7 +2,7 @@
 
 A powerful, professional trading application with advanced charting capabilities, technical analysis, and AI-powered insights.
 
-![Aley Trader](https://img.shields.io/badge/Version-2.1-blue?style=for-the-badge)
+![Aley Trader](https://img.shields.io/badge/Version-2.2-blue?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.8+-green?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
 
@@ -14,12 +14,15 @@ A powerful, professional trading application with advanced charting capabilities
 - **Technical Analysis** - RSI, Bollinger Bands, Volume Profile, MACD, VWAP, SMA/EMA overlays
 - **Pre/Post Market Data** - Extended hours trading information
 - **Interactive Charts** - Zoom, pan, and scroll through price history
+- **Live Last-Candle Update** - Lightweight 5s updates that move only the newest candlestick without redrawing the chart
+- **Resizable Split View** - Drag the sash to resize chart vs. side panel; expand/collapse individual panels
+- **Multi-Window** - Launch a new application window from the UI (“New Window”)
 
 ### 🌊 Overflow Chart System
 - **RSI Overflow Charts** - Specialized charts for overbought/oversold conditions
 - **Volume Spike Analysis** - Identify unusual volume patterns
 - **Price Breakout Detection** - Spot significant price movements
-- **Smooth Animations** - Beautiful pull-down slide transitions between chart types
+- **Seamless Switching** - Quickly switch chart types from a dropdown
 - **Threshold Analysis** - Statistical insights on market extremes
 
 ### 🤖 AI-Powered Analysis
@@ -40,6 +43,21 @@ A powerful, professional trading application with advanced charting capabilities
 - **Intuitive Navigation** - Tabs for Home, News, Heatmap, Screener, and Charts
  - **Indicator Persistence** - Remembers your selections per symbol (and a global default) across app restarts
 - **Real-time Updates** - Auto-refresh capabilities with customizable intervals
+ - **Side Panel Modules** - Watchlist, DOM (simulated ladder), Notes, and AI quick view with expand/collapse
+
+### 📈 Order Book (DOM)
+- **Simulated Ladder** - Bid/ask ladders around the latest price
+- **1s Refresh** - Updates every second based on the most recent trade price
+- Designed for low overhead while providing an order-book style view
+
+## 🆕 What’s New
+
+September 2025
+- Live 5-second last-candle updater on candlestick charts (moves only the latest bar)
+- Resizable split pane between chart and side panel; panel expand/collapse controls
+- DOM panel now updates every second using the latest price as baseline (lightweight simulation)
+- “New Window” button to spawn additional app instances
+- Trading toolbar docked on the left (placeholders for drawing tools)
 
 ## 🚀 Quick Start
 
@@ -70,8 +88,13 @@ A powerful, professional trading application with advanced charting capabilities
    ```
 
 4. **Run the application**
+   Use the path that exists in your checkout:
    ```bash
+   # Option A (project root script)
    python aley_trader.py
+
+   # Option B (module inside folder)
+   python Aley_trader/aley_trader.py
    ```
 
 ### First Time Setup
@@ -99,6 +122,9 @@ A powerful, professional trading application with advanced charting capabilities
 | **Chart Type Dropdown** | Choose between Candlestick, RSI Overflow, Volume Overflow, Price Breakout |
 | **Auto Refresh Toggle** | Enable/disable automatic chart updates |
 | **Manual Refresh** | Force immediate chart reload |
+| **Left Toolbar** | Access drawing-tool placeholders |
+| **Panel Expand (⇅/⤢)** | Expand/collapse Watchlist, DOM, Notes, AI panels |
+| **Resize Sash** | Drag between chart and side panel to resize |
 | **Mouse Scroll** | Zoom in/out on chart |
 | **Mouse Drag** | Pan around chart area |
 
@@ -267,7 +293,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 For support, questions, or feature requests:
 - Open an issue on GitHub
-- Contact: emmettgriffith@example.com
+- Contact: emmettg@griffithind.com
 
 ## 🎉 Acknowledgments
 
