@@ -2,7 +2,7 @@
 
 A powerful, professional trading application with advanced charting capabilities, technical analysis, and AI-powered insights.
 
-![Aley Trader](https://img.shields.io/badge/Version-2.0-blue?style=for-the-badge)
+![Aley Trader](https://img.shields.io/badge/Version-2.2-blue?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.8+-green?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
 
@@ -11,15 +11,18 @@ A powerful, professional trading application with advanced charting capabilities
 ### 🔥 Core Trading Features
 - **Real-time Market Data** - Live stock prices, volume, and historical data via Yahoo Finance
 - **Advanced Charting** - Multiple timeframes (1m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 1d)
-- **Technical Analysis** - RSI, Bollinger Bands, Volume Profile, and more
+- **Technical Analysis** - RSI, Bollinger Bands, Volume Profile, MACD, VWAP, SMA/EMA overlays
 - **Pre/Post Market Data** - Extended hours trading information
 - **Interactive Charts** - Zoom, pan, and scroll through price history
+- **Live Last-Candle Update** - Lightweight 5s updates that move only the newest candlestick without redrawing the chart
+- **Resizable Split View** - Drag the sash to resize chart vs. side panel; expand/collapse individual panels
+- **Multi-Window** - Launch a new application window from the UI (“New Window”)
 
 ### 🌊 Overflow Chart System
 - **RSI Overflow Charts** - Specialized charts for overbought/oversold conditions
 - **Volume Spike Analysis** - Identify unusual volume patterns
 - **Price Breakout Detection** - Spot significant price movements
-- **Smooth Animations** - Beautiful pull-down slide transitions between chart types
+- **Seamless Switching** - Quickly switch chart types from a dropdown
 - **Threshold Analysis** - Statistical insights on market extremes
 
 ### 🤖 AI-Powered Analysis
@@ -37,8 +40,24 @@ A powerful, professional trading application with advanced charting capabilities
 ### 🎨 Professional UI
 - **Deep Sea Theme** - Beautiful dark blue color scheme
 - **Responsive Design** - Scales to any screen size
-- **Intuitive Navigation** - Tabbed interface with quick access buttons
+- **Intuitive Navigation** - Tabs for Home, News, Heatmap, Screener, and Charts
+ - **Indicator Persistence** - Remembers your selections per symbol (and a global default) across app restarts
 - **Real-time Updates** - Auto-refresh capabilities with customizable intervals
+ - **Side Panel Modules** - Watchlist, DOM (simulated ladder), Notes, and AI quick view with expand/collapse
+
+### 📈 Order Book (DOM)
+- **Simulated Ladder** - Bid/ask ladders around the latest price
+- **1s Refresh** - Updates every second based on the most recent trade price
+- Designed for low overhead while providing an order-book style view
+
+## 🆕 What’s New
+
+September 2025
+- Live 5-second last-candle updater on candlestick charts (moves only the latest bar)
+- Resizable split pane between chart and side panel; panel expand/collapse controls
+- DOM panel now updates every second using the latest price as baseline (lightweight simulation)
+- “New Window” button to spawn additional app instances
+- Trading toolbar docked on the left (placeholders for drawing tools)
 
 ## 🚀 Quick Start
 
@@ -53,8 +72,8 @@ A powerful, professional trading application with advanced charting capabilities
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/emmettgriffith/Lumi_Project.git
-   cd Lumi_Project
+   git clone https://github.com/emmettgriffith/Aley_Trader.git
+   cd Aley_Trader
    ```
 
 2. **Install dependencies**
@@ -69,8 +88,13 @@ A powerful, professional trading application with advanced charting capabilities
    ```
 
 4. **Run the application**
+   Use the path that exists in your checkout:
    ```bash
+   # Option A (project root script)
    python aley_trader.py
+
+   # Option B (module inside folder)
+   python Aley_trader/aley_trader.py
    ```
 
 ### First Time Setup
@@ -84,10 +108,11 @@ A powerful, professional trading application with advanced charting capabilities
 
 ### Navigation
 
-- **Home Page** - Overview with quick tabs and market screeners
-- **Chart Tabs** - Individual stock charts with full technical analysis
-- **Watchlist** - Track your favorite stocks with real-time updates
-- **Settings** - Customize appearance and data preferences
+- **Home** - Startup page in a tab with quick actions (Screener, News, Heatmap, quick “Open” box)
+- **Chart Tabs** - Individual stock charts with full technical analysis; indicator choices persist per symbol
+- **News Flow** - Live headlines with symbol filter and auto‑refresh; double‑click to open
+- **Heatmap** - Color‑coded performance grid for selected universes
+- **Screener** - Scan universes; open or add tickers to watchlist via context menu
 
 ### Chart Controls
 
@@ -97,6 +122,9 @@ A powerful, professional trading application with advanced charting capabilities
 | **Chart Type Dropdown** | Choose between Candlestick, RSI Overflow, Volume Overflow, Price Breakout |
 | **Auto Refresh Toggle** | Enable/disable automatic chart updates |
 | **Manual Refresh** | Force immediate chart reload |
+| **Left Toolbar** | Access drawing-tool placeholders |
+| **Panel Expand (⇅/⤢)** | Expand/collapse Watchlist, DOM, Notes, AI panels |
+| **Resize Sash** | Drag between chart and side panel to resize |
 | **Mouse Scroll** | Zoom in/out on chart |
 | **Mouse Drag** | Pan around chart area |
 
@@ -151,7 +179,7 @@ TAAPI_KEY=your_taapi_key_here
 ### File Structure
 
 ```
-Lumi_Project/
+Aley_Trader/
 ├── aley_trader.py              # Main application
 ├── overflow_chart.py           # Overflow chart module
 ├── overflow_demo.py            # Standalone overflow chart demo
@@ -161,7 +189,8 @@ Lumi_Project/
 ├── README.md                  # This file
 └── user_data_[username]/      # User-specific data (auto-created)
     ├── watchlist.json         # Personal watchlist
-    └── custom_tabs.json       # Quick tab configuration
+    ├── custom_tabs.json       # Quick tab configuration
+    └── indicator_prefs.json   # Saved indicator selections (per symbol + default)
 ```
 
 ## 🔧 Configuration
@@ -187,6 +216,15 @@ Each user gets their own data directory with:
 - **watchlist.json** - Personal stock watchlist
 - **custom_tabs.json** - Quick access tab configuration
 - **remember_me.dat** - Encrypted login credentials (if enabled)
+- **indicator_prefs.json** - Indicator selections per symbol and a global “_default” profile
+
+### Screener “All US” Setup (optional)
+Place a symbols file in the project (root, `data/`, or `tools/`) to enable a broad US scan:
+- `symbols.txt` or `tickers.txt` (one ticker per line)
+- `nasdaq_screener.csv` (CSV with a `Symbol` column)
+- `symbols.csv` / `tickers.csv` (CSV with `Symbol` or `Ticker` column)
+
+If none is present, the Screener uses a fast Mega‑Caps set.
 
 ## 🎯 Usage Examples
 
@@ -255,7 +293,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 For support, questions, or feature requests:
 - Open an issue on GitHub
-- Contact: emmettgriffith@example.com
+- Contact: emmettg@griffithind.com
 
 ## 🎉 Acknowledgments
 
