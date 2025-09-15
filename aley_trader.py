@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
+import logging
+import subprocess  # Added for spawning new application windows
 import yfinance as yf
 import pandas as pd
-import subprocess  # Added for spawning new application windows
 # Import pandas_ta with error handling
 try:
     import pandas_ta as ta
     PANDAS_TA_AVAILABLE = True
 except ImportError as e:
-    print(f"Warning: pandas_ta not available ({e}). Technical indicators will be simplified.")
+    logging.warning(f"pandas_ta not available ({e}). Using simplified indicators.")
     PANDAS_TA_AVAILABLE = False
     ta = None
 import requests
@@ -22,11 +23,6 @@ from tkinter import messagebox, ttk
 import tkinter.simpledialog as simpledialog
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Rectangle
-import requests
-import re
-import time
-import yfinance as yf
-import pandas as pd
 import numpy as np  # <-- Add this import
 from dotenv import load_dotenv
 import json
@@ -44,6 +40,9 @@ import hmac
 import base64
 import platform
 import overflow_chart  # Add overflow chart module
+
+# Basic logging configuration
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # AI patterns module for advanced pattern recognition
 try:
@@ -80,6 +79,9 @@ DEEP_SEA_THEME = {
     'shadow': '#0F1A2B'             # Shadow color
 }
 
+# Global reference to the active main notebook (chart/news/heatmap tabs)
+GLOBAL_NOTEBOOK = None
+
 # Simple RSI calculation function for when pandas_ta is not available
 def calculate_simple_rsi(prices, period=14):
     """Calculate simple RSI without pandas_ta"""
@@ -103,11 +105,11 @@ load_dotenv(env_path)
 if not os.getenv('OPENAI_API_KEY'):
     load_dotenv('.env')
 
-# Debug: Print if environment variables are loaded
+# Debug: Log if environment variables are loaded
 if os.getenv('OPENAI_API_KEY'):
-    print("OpenAI API key loaded successfully")
+    logging.info("OpenAI API key loaded successfully")
 else:
-    print("Warning: OpenAI API key not found in environment")
+    logging.warning("OpenAI API key not found in environment")
 
 # Default ticker symbol from environment or fallback to MSFT
 symbol = os.getenv("DEFAULT_SYMBOL", "MSFT")
@@ -136,62 +138,102 @@ def initialize_market_data():
             # Calculate percent gain
             percent_gain = ((latest_close - prev_close) / prev_close) * 100
 
-            print(f"{symbol} previous close: {prev_close}")
-            print(f"{symbol} latest close: {latest_close}")
-            print(f"Percent gain: {percent_gain:.2f}%")
+            logging.info(f"{symbol} previous close: {prev_close}")
+            logging.info(f"{symbol} latest close: {latest_close}")
+            logging.info(f"Percent gain: {percent_gain:.2f}%")
     except Exception as e:
-        print(f"Error initializing market data: {e}")
+        logging.warning(f"Error initializing market data: {e}")
         # Set defaults
         prev_close = 100.0
         latest_close = 102.0
         percent_gain = 2.0
 
+# --- HTTP helper with timeout/retries ---
+def http_get_json(url, params=None, timeout=10, retries=2, backoff=1.5):
+    """GET JSON with basic retries and timeout."""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(backoff * (attempt + 1))
+            else:
+                break
+    raise last_err if last_err else RuntimeError("Unknown request error")
+
+def http_get_text(url, params=None, timeout=10, retries=2, backoff=1.5, headers=None):
+    """GET text with basic retries, timeout, and a browser-like User-Agent."""
+    last_err = None
+    if headers is None:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout, headers=headers)
+            resp.raise_for_status()
+            resp.encoding = resp.encoding or "utf-8"
+            return resp.text
+        except Exception as e:
+            last_err = e
+            if attempt < retries:
+                time.sleep(backoff * (attempt + 1))
+            else:
+                break
+    raise last_err if last_err else RuntimeError("Unknown request error")
+
 # --- Technical Analysis Signal Section ---
 TAAPI_KEY = os.getenv("TAAPI_KEY", "YOUR_TAAPI_KEY")  # Load from environment variable
 
 def get_ta_signal(symbol):
-    url = f"https://api.taapi.io/summary"
+    if not TAAPI_KEY or TAAPI_KEY == "YOUR_TAAPI_KEY":
+        logging.warning("TAAPI_KEY missing; skipping TA signal fetch")
+        return "Signal unavailable"
+    url = "https://api.taapi.io/summary"
     params = {
         "secret": TAAPI_KEY,
         "exchange": "NASDAQ",
         "symbol": symbol,
-        "interval": "1d"
+        "interval": "1d",
     }
     try:
-        response = requests.get(url, params=params)
-        data = response.json()
-        if "recommendation" in data:
-            recommendation = data["recommendation"].lower()
+        data = http_get_json(url, params=params, timeout=10, retries=2)
+        if isinstance(data, dict) and "recommendation" in data:
+            recommendation = str(data.get("recommendation", "")).lower()
             if "buy" in recommendation:
                 return "Buy"
-            elif "sell" in recommendation:
+            if "sell" in recommendation:
                 return "Sell"
-            elif "hold" in recommendation:
+            if "hold" in recommendation:
                 return "Hold"
-            else:
-                return f"Signal: {data['recommendation']}"
-        else:
-            return f"No signal available: {data}"
+            return f"Signal: {data.get('recommendation')}"
+        return "No signal available"
     except Exception as e:
-        return f"Error fetching TA signal: {e}"
+        logging.warning(f"TAAPI signal error: {e}")
+        return "Signal unavailable"
 
 def get_rsi(symbol):
-    url = f"https://api.taapi.io/rsi"
+    if not TAAPI_KEY or TAAPI_KEY == "YOUR_TAAPI_KEY":
+        return None
+    url = "https://api.taapi.io/rsi"
     params = {
         "secret": TAAPI_KEY,
         "exchange": "NASDAQ",
         "symbol": symbol,
-        "interval": "1d"
+        "interval": "1d",
     }
     try:
-        response = requests.get(url, params=params)
-        data = response.json()
-        if "value" in data:
-            return float(data["value"])
-        else:
-            return None
+        data = http_get_json(url, params=params, timeout=10, retries=2)
+        if isinstance(data, dict) and "value" in data:
+            return float(data["value"])  # may raise ValueError; that's fine
     except Exception as e:
-        return None
+        logging.warning(f"TAAPI RSI error: {e}")
+    return None
 
 # Initialize global variables for technical analysis
 ta_signal = None
@@ -204,20 +246,20 @@ def initialize_technical_analysis():
     try:
         # Display technical analysis signal
         ta_signal = get_ta_signal(symbol)
-        print(f"Technical Analysis Signal for {symbol}: {ta_signal}")
+        logging.info(f"Technical Analysis Signal for {symbol}: {ta_signal}")
 
         # Display RSI and overbought status
         rsi = get_rsi(symbol)
         if rsi is not None:
-            print(f"RSI for {symbol}: {rsi:.2f}")
+            logging.info(f"RSI for {symbol}: {rsi:.2f}")
             if rsi > 70:
-                print("Warning: The stock is overbought (RSI > 70)!")
+                logging.info("The stock is overbought (RSI > 70)!")
             elif rsi < 30:
-                print("The stock is oversold (RSI < 30).")
+                logging.info("The stock is oversold (RSI < 30).")
         else:
-            print("Could not retrieve RSI value.")
+            logging.info("Could not retrieve RSI value.")
     except Exception as e:
-        print(f"Error initializing technical analysis: {e}")
+        logging.warning(f"Error initializing technical analysis: {e}")
         ta_signal = "Signal unavailable"
         rsi = 50.0  # Default RSI
 
@@ -246,22 +288,44 @@ def get_in_depth_analysis(symbol):
     # Fetch company info and financials using yfinance
     ticker_obj = yf.Ticker(symbol)  # Create new ticker object for this symbol
     info = ticker_obj.info
-    financials = ticker_obj.financials.replace({np.nan: np.nan})  # Fix NaN to nan
-    balance_sheet = ticker_obj.balance_sheet.replace({np.nan: np.nan})  # Fix NaN to nan
-    cashflow = ticker_obj.cashflow.replace({np.nan: np.nan})  # Fix NaN to nan
+    financials = ticker_obj.financials.replace({np.nan: np.nan}) if hasattr(ticker_obj, 'financials') else pd.DataFrame()
+    balance_sheet = ticker_obj.balance_sheet.replace({np.nan: np.nan}) if hasattr(ticker_obj, 'balance_sheet') else pd.DataFrame()
+    cashflow = ticker_obj.cashflow.replace({np.nan: np.nan}) if hasattr(ticker_obj, 'cashflow') else pd.DataFrame()
+
+    def summarize_info(info_dict):
+        keys = [
+            'longName','sector','industry','marketCap',
+            'trailingPE','forwardPE','profitMargins','revenueGrowth','earningsGrowth',
+            'beta','dividendYield','payoutRatio','debtToEquity'
+        ]
+        return {k: info_dict.get(k) for k in keys if k in info_dict}
+
+    def summarize_df(df, rows):
+        if df is None or df.empty:
+            return {}
+        out = {}
+        for r in rows:
+            try:
+                s = df.loc[r].dropna()
+                # Take last up to 4 points
+                out[r] = {str(k): float(v) if pd.notna(v) else None for k, v in list(s.to_dict().items())[-4:]}
+            except Exception:
+                continue
+        return out
+
+    fin_sum = summarize_df(financials, ['Total Revenue','Gross Profit','Operating Income','Net Income'])
+    bs_sum = summarize_df(balance_sheet, ['Total Assets','Total Liab','Cash','Total Stockholder Equity'])
+    cf_sum = summarize_df(cashflow, ['Total Cash From Operating Activities','Capital Expenditures','Free Cash Flow'])
 
     # Prepare a summary for OpenAI
     prompt = (
-        f"Provide an in-depth financial analysis of {info.get('longName', symbol)} ({symbol}). "
-        f"Include recent financial performance, balance sheet health, cash flow, and long-term growth prospects. "
-        f"Here is some data:\n"
-        f"Company Info: {info}\n"
-        f"Financials: {financials.to_dict() if not financials.empty else 'N/A'}\n"
-        f"Balance Sheet: {balance_sheet.to_dict() if not balance_sheet.empty else 'N/A'}\n"
-        f"Cash flow: {cashflow.to_dict() if not cashflow.empty else 'N/A'}\n"
-        f"Percent gain over last 2 days: {percent_gain:.2f}%\n"
-        f"Technical Analysis Signal: {ta_signal}\n"
-        f"RSI: {rsi if rsi is not None else 'N/A'}"
+        f"Provide a concise, insight-driven financial analysis of {info.get('longName', symbol)} ({symbol}). "
+        f"Discuss profitability, growth, leverage, cash generation, and risks. Use the data below.\n"
+        f"Company Info (key fields): {summarize_info(info)}\n"
+        f"Financials (last periods): {fin_sum}\n"
+        f"Balance Sheet (last periods): {bs_sum}\n"
+        f"Cash Flow (last periods): {cf_sum}\n"
+        f"2-day price change: {percent_gain:.2f}% | TA signal: {ta_signal} | RSI: {rsi if rsi is not None else 'N/A'}"
     )
 
     try:
@@ -287,10 +351,10 @@ def initialize_openai_analysis():
     try:
         # Get and display in-depth analysis
         analysis = get_in_depth_analysis(symbol)
-        print("\n--- In-Depth Financial Analysis (OpenAI) ---")
-        print(analysis)
+        logging.info("--- In-Depth Financial Analysis (OpenAI) ---")
+        logging.info(analysis)
     except Exception as e:
-        print(f"Error initializing OpenAI analysis: {e}")
+        logging.warning(f"Error initializing OpenAI analysis: {e}")
         analysis = "Analysis unavailable - please check API configuration"
 
 # --- Chart display window with stock chart and technical indicators ---
@@ -755,6 +819,19 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
         # Add control bar at the top of chart frame
         control_frame = tk.Frame(frame, bg=DEEP_SEA_THEME['secondary_bg'])
         control_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+
+        # --- Indicators state (persist across redraws) ---
+        saved_state = get_indicator_state(symbol)
+        if not hasattr(frame, "indicator_vars"):
+            frame.indicator_vars = {
+                "RSI": tk.BooleanVar(value=bool(saved_state.get("RSI", True))),
+                "SMA 20": tk.BooleanVar(value=bool(saved_state.get("SMA 20", False))),
+                "EMA 50": tk.BooleanVar(value=bool(saved_state.get("EMA 50", False))),
+                "Bollinger (20,2)": tk.BooleanVar(value=bool(saved_state.get("Bollinger (20,2)", False))),
+                "VWAP": tk.BooleanVar(value=bool(saved_state.get("VWAP", False))),
+                "MACD": tk.BooleanVar(value=bool(saved_state.get("MACD", False))),
+            }
+        indicator_vars = frame.indicator_vars
         
         # Chart type selector (new overflow chart integration)
         chart_selector_frame = tk.Frame(control_frame, bg=DEEP_SEA_THEME['secondary_bg'])
@@ -823,10 +900,57 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             tf_btn.pack(side=tk.LEFT, padx=1)
         
 
-        # Indicator bar (top right, empty for now, space for future indicators)
-        indicator_bar = tk.Frame(control_frame, bg=DEEP_SEA_THEME['surface_bg'], width=180, height=32, highlightbackground=DEEP_SEA_THEME['border'], highlightthickness=1)
-        indicator_bar.pack(side=tk.RIGHT, padx=(30, 4), pady=2)
+        # Indicator dropdown button (beside Add Tab)
+        def open_indicator_menu(event=None):
+            try:
+                menu.tk_popup(indicator_btn.winfo_rootx(), indicator_btn.winfo_rooty() + indicator_btn.winfo_height())
+            finally:
+                menu.grab_release()
+
+        indicator_btn = tk.Button(
+            control_frame,
+            text="Indicators ▾",
+            command=open_indicator_menu,
+            font=("Segoe UI", 9, "bold"),
+            bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary'],
+            activebackground=DEEP_SEA_THEME['hover'], activeforeground=DEEP_SEA_THEME['text_primary'],
+            bd=2, relief="raised", width=12, height=1
+        )
+        indicator_btn.pack(side=tk.RIGHT, padx=(4, 2), pady=2)
+
+        menu = tk.Menu(indicator_btn, tearoff=0, bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_primary'])
+        def toggle_and_redraw(name):
+            # Save current indicator state for this symbol and as global default
+            try:
+                state_now = {k: var.get() for k, var in indicator_vars.items()}
+                set_indicator_state(symbol, state_now)
+                set_default_indicator_state(state_now)
+            except Exception:
+                pass
+            frame.after(10, lambda: draw_chart(chart_type=current_chart_type.get()))
+
+        for name in ["RSI", "SMA 20", "EMA 50", "Bollinger (20,2)", "VWAP", "MACD"]:
+            menu.add_checkbutton(
+                label=name,
+                onvalue=True,
+                offvalue=False,
+                variable=indicator_vars[name],
+                command=lambda n=name: toggle_and_redraw(n)
+            )
+
+        # Indicator bar shows active indicator tags
+        indicator_bar = tk.Frame(control_frame, bg=DEEP_SEA_THEME['surface_bg'], width=220, height=32, highlightbackground=DEEP_SEA_THEME['border'], highlightthickness=1)
+        indicator_bar.pack(side=tk.RIGHT, padx=(8, 4), pady=2)
         indicator_bar.pack_propagate(False)
+        for k, var in indicator_vars.items():
+            if var.get():
+                tag = tk.Label(
+                    indicator_bar,
+                    text=k,
+                    bg=DEEP_SEA_THEME['accent_bg'], fg=DEEP_SEA_THEME['text_primary'],
+                    font=("Segoe UI", 8, "bold"), padx=6, pady=2
+                )
+                tag.pack(side=tk.LEFT, padx=2)
 
         # Add Tab button (next to indicator bar)
         def add_tab():
@@ -1073,26 +1197,38 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
         # Create matplotlib figure with enhanced interactivity (for candlestick charts)
         plt.close('all')  # Close any existing figures
         fig = plt.figure(figsize=(width, height), facecolor=DEEP_SEA_THEME['primary_bg'])
-        
-        # Enhanced grid specification for better layout
+
+        # Determine which subplots are needed
+        rsi_enabled = bool(indicator_vars.get("RSI") and indicator_vars["RSI"].get())
+        macd_enabled = bool(indicator_vars.get("MACD") and indicator_vars["MACD"].get())
+
+        # Dynamic grid specification based on selected indicators
+        if rsi_enabled and macd_enabled:
+            height_ratios = [12, 0.6, 2.7, 2.7]
+        elif rsi_enabled or macd_enabled:
+            height_ratios = [12, 0.6, 3.6, 0.3]
+        else:
+            height_ratios = [12, 0.6, 0.3, 0.3]
+
         gs = fig.add_gridspec(
             4, 2,
-            width_ratios=[8, 1],  # More space for main chart
-            height_ratios=[12, 1, 3, 1],  # Better proportions
+            width_ratios=[8, 1],
+            height_ratios=height_ratios,
             wspace=0.02,
             hspace=0.05
         )
-        
+
         # Main price chart
         ax1 = fig.add_subplot(gs[0, 0])
-        # RSI subplot  
-        ax2 = fig.add_subplot(gs[2, 0], sharex=ax1)
-        # Volume profile
+        # Bottom indicator slots (we'll assign RSI/MACD as needed)
+        ax_bottom1 = fig.add_subplot(gs[2, 0], sharex=ax1)
+        ax_bottom2 = fig.add_subplot(gs[3, 0], sharex=ax1)
+        # Volume profile at right
         ax_vp = fig.add_subplot(gs[0:3, 1], sharey=ax1)
         
         # Enable interactive navigation
         ax1.set_navigate(True)
-        ax2.set_navigate(True)
+        ax_bottom1.set_navigate(True)
         
         # Chart container with scrollable canvas
         chart_container = tk.Frame(frame, bg=DEEP_SEA_THEME['primary_bg'])
@@ -1214,7 +1350,8 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
 
         # Set chart face colors and styling
         ax1.set_facecolor(DEEP_SEA_THEME['primary_bg'])
-        ax2.set_facecolor(DEEP_SEA_THEME['primary_bg'])
+        ax_bottom1.set_facecolor(DEEP_SEA_THEME['primary_bg'])
+        ax_bottom2.set_facecolor(DEEP_SEA_THEME['primary_bg'])
         ax_vp.set_facecolor(DEEP_SEA_THEME['primary_bg'])
 
         # Set proper axis limits to ensure candlesticks are visible
@@ -1266,20 +1403,83 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             ax1.axhline(high_vol_price, color='#ffd600', linestyle='--', linewidth=1, alpha=0.7)
             ax1.axhline(low_vol_price, color='#00e5ff', linestyle='--', linewidth=1, alpha=0.7)
         
-        # Simplified RSI subplot - only if data exists
-        if 'RSI' in chart_hist.columns and not chart_hist['RSI'].isna().all():
-            ax2.plot(chart_hist['Date'], chart_hist['RSI'], color=rsi_color, linewidth=1.5)
-            ax2.axhline(70, color=overbought_color, linestyle='--', linewidth=1)
-            ax2.axhline(30, color=oversold_color, linestyle='--', linewidth=1)
-            ax2.set_ylabel("RSI", color='#fff')
-            ax2.set_ylim(0, 100)
-            ax2.set_title("RSI", color='#fff', fontsize=12)
-            ax2.tick_params(axis='x', colors='#aaa')
-            ax2.tick_params(axis='y', colors='#aaa')
-            ax2.grid(True, color=grid_color, linestyle='-', linewidth=0.3)
+        # --- Technical indicator overlays on price chart ---
+        try:
+            if indicator_vars.get("SMA 20") and indicator_vars["SMA 20"].get():
+                chart_hist["SMA20"] = pd.Series(chart_hist['Close']).rolling(20, min_periods=1).mean()
+                ax1.plot(chart_hist['Date'], chart_hist['SMA20'], color="#00BCD4", linewidth=1.4, label="SMA 20")
+            if indicator_vars.get("EMA 50") and indicator_vars["EMA 50"].get():
+                chart_hist["EMA50"] = pd.Series(chart_hist['Close']).ewm(span=50, adjust=False).mean()
+                ax1.plot(chart_hist['Date'], chart_hist['EMA50'], color="#FFC107", linewidth=1.4, label="EMA 50")
+            if indicator_vars.get("Bollinger (20,2)") and indicator_vars["Bollinger (20,2)"].get():
+                mid = pd.Series(chart_hist['Close']).rolling(20, min_periods=20).mean()
+                std = pd.Series(chart_hist['Close']).rolling(20, min_periods=20).std()
+                upper = mid + 2 * std
+                lower = mid - 2 * std
+                ax1.plot(chart_hist['Date'], upper, color=bb_color, linewidth=1.0, linestyle='--', label='BB Upper')
+                ax1.plot(chart_hist['Date'], lower, color=bb_color, linewidth=1.0, linestyle='--', label='BB Lower')
+                ax1.fill_between(chart_hist['Date'], lower, upper, color=bb_color, alpha=0.08)
+            if indicator_vars.get("VWAP") and indicator_vars["VWAP"].get():
+                tp = (chart_hist['High'] + chart_hist['Low'] + chart_hist['Close']) / 3.0
+                vol = chart_hist['Volume'].replace(0, np.nan)
+                vwap = (tp * vol).cumsum() / vol.cumsum()
+                ax1.plot(chart_hist['Date'], vwap, color="#9C27B0", linewidth=1.2, label='VWAP')
+        except Exception as ind_err:
+            print(f"Indicator overlay error: {ind_err}")
+
+        # --- Subplot assignment for RSI/MACD ---
+        rsi_enabled = bool(indicator_vars.get("RSI") and indicator_vars["RSI"].get())
+        macd_enabled = bool(indicator_vars.get("MACD") and indicator_vars["MACD"].get())
+        ax_rsi = None
+        ax_macd = None
+        if rsi_enabled and macd_enabled:
+            ax_rsi = ax_bottom1
+            ax_macd = ax_bottom2
+        elif rsi_enabled and not macd_enabled:
+            ax_rsi = ax_bottom1
+            ax_bottom2.set_visible(False)
+        elif macd_enabled and not rsi_enabled:
+            ax_macd = ax_bottom1
+            ax_bottom2.set_visible(False)
         else:
-            # Hide RSI subplot if no data
-            ax2.set_visible(False)
+            # Neither enabled
+            ax_bottom1.set_visible(False)
+            ax_bottom2.set_visible(False)
+
+        # RSI subplot (only if selected and data exists)
+        if ax_rsi is not None and ('RSI' in chart_hist.columns and not chart_hist['RSI'].isna().all()):
+            ax_rsi.plot(chart_hist['Date'], chart_hist['RSI'], color=rsi_color, linewidth=1.5)
+            ax_rsi.axhline(70, color=overbought_color, linestyle='--', linewidth=1)
+            ax_rsi.axhline(30, color=oversold_color, linestyle='--', linewidth=1)
+            ax_rsi.set_ylabel("RSI", color='#fff')
+            ax_rsi.set_ylim(0, 100)
+            ax_rsi.set_title("RSI", color='#fff', fontsize=12)
+            ax_rsi.tick_params(axis='x', colors='#aaa')
+            ax_rsi.tick_params(axis='y', colors='#aaa')
+            ax_rsi.grid(True, color=grid_color, linestyle='-', linewidth=0.3)
+
+        # MACD subplot (only if selected)
+        if ax_macd is not None:
+            try:
+                close_series = pd.Series(chart_hist['Close'])
+                ema12 = close_series.ewm(span=12, adjust=False).mean()
+                ema26 = close_series.ewm(span=26, adjust=False).mean()
+                macd_line = ema12 - ema26
+                signal_line = macd_line.ewm(span=9, adjust=False).mean()
+                hist = macd_line - signal_line
+                # Plot histogram bars
+                colors = np.where(hist >= 0, '#26A69A', '#EF5350')
+                ax_macd.bar(chart_hist['Date'], hist, color=colors, alpha=0.6, width=0.6)
+                # Plot MACD and Signal lines
+                ax_macd.plot(chart_hist['Date'], macd_line, color='#42A5F5', linewidth=1.3, label='MACD')
+                ax_macd.plot(chart_hist['Date'], signal_line, color='#FF7043', linewidth=1.1, label='Signal')
+                ax_macd.set_ylabel("MACD", color='#fff')
+                ax_macd.set_title("MACD", color='#fff', fontsize=12)
+                ax_macd.tick_params(axis='x', colors='#aaa')
+                ax_macd.tick_params(axis='y', colors='#aaa')
+                ax_macd.grid(True, color=grid_color, linestyle='-', linewidth=0.3)
+            except Exception as macd_err:
+                print(f"MACD error: {macd_err}")
 
         # Simplified volume profile
         if len(volume_profile) > 0:
@@ -1435,6 +1635,62 @@ def save_watchlist(watchlist):
         print(f"Error saving watchlist: {e}")
         return False
 
+# --- Indicator preferences persistence ---
+INDICATOR_PREFS_FILENAME = "indicator_prefs.json"
+
+def _load_indicator_prefs():
+    try:
+        path = get_user_data_path(INDICATOR_PREFS_FILENAME)
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    return {}
+
+def _save_indicator_prefs(prefs: dict):
+    try:
+        path = get_user_data_path(INDICATOR_PREFS_FILENAME)
+        with open(path, "w") as f:
+            json.dump(prefs, f, indent=2)
+        return True
+    except Exception:
+        return False
+
+def get_indicator_state(symbol: str) -> dict:
+    """Return saved indicator booleans for a symbol, or defaults if none."""
+    prefs = _load_indicator_prefs()
+    sym = (symbol or "").upper()
+    state = prefs.get(sym) or prefs.get("_default")
+    if not isinstance(state, dict):
+        state = {}
+    # Defaults
+    base = {
+        "RSI": True,
+        "SMA 20": False,
+        "EMA 50": False,
+        "Bollinger (20,2)": False,
+        "VWAP": False,
+        "MACD": False,
+    }
+    base.update({k: bool(v) for k, v in state.items() if k in base})
+    return base
+
+def set_indicator_state(symbol: str, state: dict):
+    """Save indicator booleans for a symbol."""
+    prefs = _load_indicator_prefs()
+    sym = (symbol or "").upper()
+    prefs[sym] = {k: bool(v) for k, v in state.items()}
+    _save_indicator_prefs(prefs)
+
+def set_default_indicator_state(state: dict):
+    """Save indicator booleans as the global default for all symbols."""
+    prefs = _load_indicator_prefs()
+    prefs["_default"] = {k: bool(v) for k, v in state.items()}
+    _save_indicator_prefs(prefs)
+
 # --- Persistent Quick Tabs (Home) --- per-user
 DEFAULT_CUSTOM_TABS = ["", "", "", "", ""]
 
@@ -1545,10 +1801,10 @@ def _encrypt_credentials(username, password):
         encrypted = fernet.encrypt(credentials.encode())
         return base64.b64encode(encrypted).decode()
     except ImportError:
-        # Fallback to base64 encoding (less secure but functional)
-        credentials = f"{username}|{password}"
-        return base64.b64encode(credentials.encode()).decode()
-    except Exception:
+        logging.warning("cryptography not installed; remember-me disabled for security")
+        return None
+    except Exception as e:
+        logging.warning(f"Encryption error: {e}")
         return None
 
 def _decrypt_credentials(encrypted_data):
@@ -1590,8 +1846,10 @@ def save_remember_me_credentials(username, password):
             with open(REMEMBER_ME_FILE, "w") as f:
                 f.write(encrypted)
             return True
+        else:
+            logging.warning("Failed to save remember-me credentials (encryption unavailable)")
     except Exception:
-        pass
+        logging.warning("Failed to save remember-me credentials")
     return False
 
 def load_remember_me_credentials():
@@ -1796,6 +2054,711 @@ def main_tabbed_chart():
         if subtitle:
             tk.Label(card, text=subtitle, font=("Segoe UI", 10), fg=DEEP_SEA_THEME['text_secondary'], bg=DEEP_SEA_THEME['card_bg']).pack(anchor="w", padx=16)
         return card_outer, card
+
+    def create_news_tab(notebook, symbol_hint: str | None = None):
+        """Create a 'News' tab inside the main notebook."""
+        tab = tk.Frame(notebook, bg=DEEP_SEA_THEME['primary_bg'])
+        notebook.add(tab, text="News")
+        notebook.select(tab)
+
+        # Top controls
+        controls = tk.Frame(tab, bg=DEEP_SEA_THEME['secondary_bg'])
+        controls.pack(side=tk.TOP, fill=tk.X)
+
+        tk.Label(controls, text="Filter symbol:", bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_secondary']).pack(side=tk.LEFT, padx=(10, 4), pady=6)
+        sym_var = tk.StringVar(value=(symbol_hint or "").upper())
+        sym_entry = tk.Entry(controls, textvariable=sym_var, bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary'], insertbackground=DEEP_SEA_THEME['text_accent'])
+        sym_entry.pack(side=tk.LEFT, padx=(0, 8), pady=6)
+
+        status_var = tk.StringVar(value="Idle")
+        tk.Label(controls, textvariable=status_var, bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_secondary']).pack(side=tk.RIGHT, padx=10)
+
+        auto_var = tk.BooleanVar(value=True)
+        def toggle_auto():
+            auto_var.set(not auto_var.get())
+            auto_btn.config(text=f"Auto: {'ON' if auto_var.get() else 'OFF'}",
+                            bg=DEEP_SEA_THEME['success'] if auto_var.get() else DEEP_SEA_THEME['danger'])
+        auto_btn = tk.Button(controls, text="Auto: ON", command=toggle_auto,
+                             font=("Segoe UI", 9, "bold"),
+                             bg=DEEP_SEA_THEME['success'], fg=DEEP_SEA_THEME['text_primary'],
+                             activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['text_primary'], bd=2)
+        auto_btn.pack(side=tk.RIGHT, padx=(4, 8), pady=4)
+
+        # Will wire after defining refresh
+        refresh_btn = tk.Button(controls, text="Refresh Now", font=("Segoe UI", 9, "bold"), bg=DEEP_SEA_THEME['info'], fg=DEEP_SEA_THEME['text_primary'], bd=2,
+                                activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['text_primary'])
+        refresh_btn.pack(side=tk.RIGHT, padx=6, pady=4)
+
+        # News list area
+        content = tk.Frame(tab, bg=DEEP_SEA_THEME['primary_bg'])
+        content.pack(fill=tk.BOTH, expand=1)
+
+        # Treeview styled to dark theme
+        style = ttk.Style(tab)
+        try:
+            style.theme_use('clam')
+        except Exception:
+            pass
+        style.configure('LiveNews.Treeview',
+                        background=DEEP_SEA_THEME['primary_bg'],
+                        fieldbackground=DEEP_SEA_THEME['primary_bg'],
+                        foreground=DEEP_SEA_THEME['text_primary'],
+                        rowheight=32,
+                        bordercolor=DEEP_SEA_THEME['border'],
+                        font=("Segoe UI", 12))
+        style.map('LiveNews.Treeview',
+                   background=[('selected', DEEP_SEA_THEME['surface_bg'])],
+                   foreground=[('selected', DEEP_SEA_THEME['text_primary'])])
+
+        columns = ("time", "symbol", "headline", "provider")
+        tree = ttk.Treeview(content, columns=columns, show='headings', style='LiveNews.Treeview')
+        tree.heading('time', text='Time')
+        tree.heading('symbol', text='Symbol')
+        tree.heading('headline', text='Headline')
+        tree.heading('provider', text='Provider')
+        tree.column('time', width=120, anchor='w')
+        tree.column('symbol', width=100, anchor='w')
+        tree.column('headline', width=720, anchor='w')
+        tree.column('provider', width=160, anchor='w')
+
+        vsb = ttk.Scrollbar(content, orient='vertical', command=tree.yview)
+        tree.configure(yscroll=vsb.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Tag styles
+        # Default row style: black background with white text
+        tree.tag_configure('newsrow', background=DEEP_SEA_THEME['primary_bg'], foreground=DEEP_SEA_THEME['text_primary'])
+        # Optional tag for newly arrived items (slightly lighter gray)
+        tree.tag_configure('new', background=DEEP_SEA_THEME['surface_bg'])
+
+        # Data + refresh loop
+        last_seen = set()
+        refresh_job = {"id": None}
+
+        FEEDS = [
+            # Broad business feeds
+            "https://feeds.reuters.com/reuters/businessNews",
+            "https://feeds.reuters.com/reuters/USBusinessNews",
+            # Yahoo Finance top stories
+            "https://finance.yahoo.com/news/rssindex",
+        ]
+
+        def parse_items(xml_text: str, url: str):
+            items = []
+            try:
+                root = ET.fromstring(xml_text)
+            except Exception:
+                return items
+            # RSS items
+            for item in root.findall('.//item'):
+                try:
+                    title_el = item.find('title')
+                    link_el = item.find('link')
+                    date_el = item.find('pubDate')
+                    source_el = item.find('source')
+                    title = (title_el.text or '').strip() if title_el is not None else ''
+                    link = (link_el.text or '').strip() if link_el is not None else ''
+                    src = (source_el.text or '').strip() if source_el is not None else urlparse(url).netloc
+                    dt = None
+                    if date_el is not None and date_el.text:
+                        try:
+                            dt = parsedate_to_datetime(date_el.text)
+                        except Exception:
+                            dt = None
+                    items.append({'title': title, 'link': link, 'source': src, 'dt': dt})
+                except Exception:
+                    continue
+            # Atom entries
+            atom_ns = '{http://www.w3.org/2005/Atom}'
+            for entry in root.findall(f'.//{atom_ns}entry'):
+                try:
+                    title_el = entry.find(f'{atom_ns}title')
+                    link_el = entry.find(f'{atom_ns}link')
+                    updated_el = entry.find(f'{atom_ns}updated') or entry.find(f'{atom_ns}published')
+                    source_el = entry.find(f'{atom_ns}source') or entry.find(f'{atom_ns}author')
+                    title = (title_el.text or '').strip() if title_el is not None else ''
+                    link = ''
+                    if link_el is not None:
+                        href = link_el.attrib.get('href')
+                        link = (href or '').strip()
+                    src = urlparse(url).netloc
+                    if source_el is not None:
+                        name_el = source_el.find(f'{atom_ns}title') or source_el.find(f'{atom_ns}name')
+                        if name_el is not None and name_el.text:
+                            src = name_el.text.strip()
+                    dt = None
+                    if updated_el is not None and updated_el.text:
+                        try:
+                            dt = parsedate_to_datetime(updated_el.text)
+                        except Exception:
+                            dt = None
+                    items.append({'title': title, 'link': link, 'source': src, 'dt': dt})
+                except Exception:
+                    continue
+            return items
+
+        def fetch_news(symbol_filter: str | None):
+            headlines = []
+            sym = (symbol_filter or '').upper().strip()
+            urls = list(FEEDS)
+            if sym:
+                # Add a symbol-specific Yahoo feed when possible
+                urls.append(f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={sym}&region=US&lang=en-US")
+            for url in urls:
+                try:
+                    xml_text = http_get_text(url, timeout=8, retries=2)
+                    if xml_text:
+                        items = parse_items(xml_text, url)
+                        headlines.extend(items)
+                except Exception:
+                    continue
+            # Filter by symbol in title if provided
+            if sym:
+                sym_re = re.compile(rf"\b{re.escape(sym)}\b", re.I)
+                headlines = [h for h in headlines if sym_re.search(h['title'])]
+            # Deduplicate by link or title
+            seen_links = set()
+            unique = []
+            for h in headlines:
+                key = h['link'] or h['title']
+                if key and key not in seen_links:
+                    seen_links.add(key)
+                    unique.append(h)
+            # Sort newest first
+            unique.sort(key=lambda x: x.get('dt') or datetime.now(timezone.utc), reverse=True)
+            return unique[:200]
+
+        def open_link(event=None):
+            sel = tree.selection()
+            if not sel:
+                return
+            # We stored link in item values at index 4 via hidden column; pull from item data
+            item_id = sel[0]
+            data = tree.item(item_id, 'values')
+            # Data values: [time, symbol, headline, provider, link]
+            if len(data) >= 5 and data[4]:
+                webbrowser.open_new_tab(data[4])
+
+        # Reconfigure columns to hold link hidden
+        tree['columns'] = ("time", "symbol", "headline", "provider", "_link")
+        tree.column("_link", width=0, stretch=False)
+        tree.heading("_link", text="")
+        tree.bind('<Double-1>', open_link)
+
+        def render_news(items, highlight_new=True):
+            # Preserve current selection and scroll position (best-effort)
+            tree.delete(*tree.get_children())
+            for h in items:
+                dt = h.get('dt')
+                timestr = dt.astimezone().strftime('%H:%M:%S') if isinstance(dt, datetime) else ''
+                title = h.get('title', '')
+                src = h.get('source', '')
+                symcol = (sym_var.get() or '').upper()
+                link = h.get('link', '')
+                is_new = link not in last_seen
+                tags = ['newsrow']
+                if highlight_new and is_new:
+                    tags.append('new')
+                tree.insert('', 'end', values=(timestr, symcol, title, src, link), tags=tuple(tags))
+                if link:
+                    last_seen.add(link)
+
+        def refresh_news(force=False):
+            status_var.set("Refreshing…")
+            tab.update_idletasks()
+            try:
+                items = fetch_news(sym_var.get())
+                if not items:
+                    # Provide a small sample if nothing fetched (e.g., offline/restricted)
+                    now = datetime.now()
+                    items = [{
+                        'title': 'Sample: Markets open mixed as investors weigh data',
+                        'link': '',
+                        'source': 'Local',
+                        'dt': now
+                    }, {
+                        'title': 'Sample: Tech stocks lead early trading',
+                        'link': '',
+                        'source': 'Local',
+                        'dt': now
+                    }]
+                    render_news(items, highlight_new=False)
+                    status_var.set("No live headlines fetched — showing samples.")
+                else:
+                    render_news(items, highlight_new=not force)
+                    status_var.set(f"Updated at {datetime.now().strftime('%H:%M:%S')}")
+            except Exception as e:
+                status_var.set(f"Error: {e}")
+            # Schedule next refresh
+            if auto_var.get() and tab.winfo_exists():
+                # 30s refresh cadence
+                refresh_job['id'] = tab.after(30000, refresh_news)
+        # Wire refresh button now
+        refresh_btn.config(command=lambda: refresh_news(force=True))
+
+        # Cancel timer on tab destroy
+        def on_destroy(_event=None):
+            if refresh_job['id'] is not None:
+                try:
+                    tab.after_cancel(refresh_job['id'])
+                except Exception:
+                    pass
+        tab.bind("<Destroy>", on_destroy)
+
+        # Initial load
+        refresh_news(force=True)
+
+    def open_news_tab(symbol_hint: str | None = None):
+        """Open or focus the News tab in the main notebook."""
+        global GLOBAL_NOTEBOOK
+        if GLOBAL_NOTEBOOK is None or not GLOBAL_NOTEBOOK.winfo_exists():
+            # Create a trading interface to host the notebook (use default symbol)
+            try:
+                open_stock_layout_with_symbol(symbol)
+            except Exception:
+                # Fallback: open_stock_layout may not be available from Home; ensure trading interface
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="2d")
+                if len(hist) >= 2:
+                    prev_close = hist['Close'].iloc[0]
+                    latest_close = hist['Close'].iloc[1]
+                    pg = ((latest_close - prev_close) / prev_close) * 100
+                else:
+                    prev_close = latest_close = 0
+                    pg = 0
+                create_trading_interface(symbol, ticker, prev_close, latest_close, pg, get_ta_signal(symbol), get_rsi(symbol) or 0, get_in_depth_analysis(symbol))
+        # Check if News tab exists
+        for i in range(len(GLOBAL_NOTEBOOK.tabs())):
+            tab_id = GLOBAL_NOTEBOOK.tabs()[i]
+            if GLOBAL_NOTEBOOK.tab(tab_id, 'text') == 'News':
+                GLOBAL_NOTEBOOK.select(tab_id)
+                return
+        # Create new News tab
+        create_news_tab(GLOBAL_NOTEBOOK, symbol_hint)
+
+    def create_heatmap_tab(notebook):
+        """Create a 'Heatmap' tab inside the main notebook."""
+        tab = tk.Frame(notebook, bg=DEEP_SEA_THEME['primary_bg'])
+        notebook.add(tab, text="Heatmap")
+        notebook.select(tab)
+
+        # Controls
+        controls = tk.Frame(tab, bg=DEEP_SEA_THEME['secondary_bg'])
+        controls.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(controls, text="Universe:", bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_secondary']).pack(side=tk.LEFT, padx=(10, 4), pady=6)
+        uni_var = tk.StringVar(value="Mega-Caps")
+        uni_dropdown = ttk.Combobox(controls, textvariable=uni_var, values=["Mega-Caps", "Tech+Banks"], state="readonly", width=14)
+        uni_dropdown.pack(side=tk.LEFT, padx=(0, 8), pady=6)
+
+        status_var = tk.StringVar(value="")
+        tk.Label(controls, textvariable=status_var, bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_secondary']).pack(side=tk.RIGHT, padx=10)
+
+        refresh_btn = tk.Button(controls, text="Refresh", font=("Segoe UI", 9, "bold"), bg=DEEP_SEA_THEME['info'], fg=DEEP_SEA_THEME['text_primary'], bd=2,
+                                activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['text_primary'])
+        refresh_btn.pack(side=tk.RIGHT, padx=6, pady=4)
+
+        # Canvas area
+        content = tk.Frame(tab, bg=DEEP_SEA_THEME['primary_bg'])
+        content.pack(fill=tk.BOTH, expand=1)
+
+        def get_universe(name):
+            if name == "Mega-Caps":
+                return [
+                    "AAPL","MSFT","NVDA","AMZN","META",
+                    "TSLA","GOOGL","BRK-B","LLY","JPM",
+                    "V","WMT","XOM","MA","UNH",
+                    "PG","HD","JNJ","AVGO","COST",
+                ]
+            else:
+                return [
+                    "AAPL","MSFT","NVDA","AMZN","META","TSLA","GOOGL","AMD","INTC","CSCO",
+                    "JPM","BAC","WFC","C","GS","MS","V","MA","PYPL","AXP"
+                ]
+
+        def pct_color(p):
+            # Map -5..+5 to red..green
+            if p is None:
+                return "#555555"
+            v = max(-5.0, min(5.0, p))
+            t = (v + 5.0) / 10.0
+            # interpolate between red (231,76,60) and green (39,174,96)
+            r1,g1,b1 = (231,76,60)
+            r2,g2,b2 = (39,174,96)
+            r = int(r1 + (r2 - r1) * t)
+            g = int(g1 + (g2 - g1) * t)
+            b = int(b1 + (b2 - b1) * t)
+            return f"#{r:02x}{g:02x}{b:02x}"
+
+        def fetch_gains(tickers):
+            data = {}
+            for tkr in tickers:
+                try:
+                    pg = get_percent_gain(tkr)
+                    if pg is None:
+                        # Fallback small random
+                        pg = round(random.uniform(-2, 2), 2)
+                except Exception:
+                    pg = round(random.uniform(-2, 2), 2)
+                data[tkr] = pg
+            return data
+
+        def render():
+            for w in content.winfo_children():
+                w.destroy()
+            tickers = get_universe(uni_var.get())
+            gains = fetch_gains(tickers)
+
+            # Compute grid size
+            cols = 5
+            rows = (len(tickers) + cols - 1) // cols
+
+            # Create matplotlib fig
+            plt.close('all')
+            fig = plt.figure(figsize=(12, 6), facecolor=DEEP_SEA_THEME['primary_bg'])
+            ax = fig.add_subplot(111)
+            ax.set_facecolor(DEEP_SEA_THEME['primary_bg'])
+            ax.set_axis_off()
+
+            cell_w = 1.0 / cols
+            cell_h = 1.0 / rows
+            for idx, tkr in enumerate(tickers):
+                r = idx // cols
+                c = idx % cols
+                x0 = c * cell_w
+                y0 = 1.0 - (r + 1) * cell_h
+                p = gains.get(tkr)
+                color = pct_color(p)
+                rect = Rectangle((x0, y0), cell_w*0.98, cell_h*0.94, facecolor=color, edgecolor=DEEP_SEA_THEME['border'])
+                ax.add_patch(rect)
+                label = f"{tkr}\n{p:+.2f}%" if p is not None else f"{tkr}\nN/A"
+                ax.text(x0 + cell_w/2, y0 + cell_h/2, label, ha='center', va='center', color=DEEP_SEA_THEME['text_primary'], fontsize=10, weight='bold')
+
+            canvas = FigureCanvasTkAgg(fig, master=content)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
+            status_var.set(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
+
+        refresh_btn.config(command=render)
+        uni_dropdown.bind('<<ComboboxSelected>>', lambda e: render())
+        render()
+
+    def open_heatmap_tab():
+        """Open or focus the Heatmap tab in the main notebook."""
+        global GLOBAL_NOTEBOOK
+        if GLOBAL_NOTEBOOK is None or not GLOBAL_NOTEBOOK.winfo_exists():
+            try:
+                open_stock_layout_with_symbol(symbol)
+            except Exception:
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="2d")
+                if len(hist) >= 2:
+                    prev_close = hist['Close'].iloc[0]
+                    latest_close = hist['Close'].iloc[1]
+                    pg = ((latest_close - prev_close) / prev_close) * 100
+                else:
+                    prev_close = latest_close = 0
+                    pg = 0
+                create_trading_interface(symbol, ticker, prev_close, latest_close, pg, get_ta_signal(symbol), get_rsi(symbol) or 0, get_in_depth_analysis(symbol))
+        # Focus if exists
+        for tab_id in GLOBAL_NOTEBOOK.tabs():
+            if GLOBAL_NOTEBOOK.tab(tab_id, 'text') == 'Heatmap':
+                GLOBAL_NOTEBOOK.select(tab_id)
+                return
+        create_heatmap_tab(GLOBAL_NOTEBOOK)
+
+    # --- Screener (TradingView-like) ---
+    def _load_symbols_from_local():
+        """Try to load a large US symbol universe from local files.
+        Supports txt (one symbol per line) and csv (with a 'Symbol' column).
+        """
+        search_names = [
+            'symbols.txt', 'tickers.txt', 'tickers_us.txt',
+            'symbols.csv', 'tickers.csv', 'nasdaq_screener.csv',
+        ]
+        roots = [script_dir, os.getcwd(), os.path.join(script_dir, 'data'), os.path.join(script_dir, 'tools')]
+        found_path = None
+        for rootp in roots:
+            if not rootp or not os.path.isdir(rootp):
+                continue
+            for name in search_names:
+                path = os.path.join(rootp, name)
+                if os.path.isfile(path):
+                    found_path = path
+                    break
+            if found_path:
+                break
+        symbols = []
+        if not found_path:
+            return symbols
+        try:
+            if found_path.lower().endswith('.csv'):
+                import csv
+                with open(found_path, 'r', newline='', encoding='utf-8', errors='ignore') as f:
+                    reader = csv.DictReader(f)
+                    # Try several possible column names
+                    cols = [c for c in reader.fieldnames or []]
+                    sym_col = None
+                    for c in cols:
+                        if c.lower() in ('symbol', 'ticker', 'symbol/ticker', 'ticker symbol'):
+                            sym_col = c
+                            break
+                    if sym_col:
+                        for row in reader:
+                            val = (row.get(sym_col) or '').strip().upper()
+                            if val:
+                                symbols.append(val)
+                    else:
+                        # fallback: first column
+                        f.seek(0)
+                        for i, line in enumerate(f):
+                            if i == 0:
+                                continue
+                            parts = line.split(',')
+                            if parts:
+                                s = parts[0].strip().upper()
+                                if s and s.isascii():
+                                    symbols.append(s)
+            else:
+                with open(found_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        s = line.strip().upper()
+                        if s and s.isascii():
+                            symbols.append(s)
+        except Exception:
+            symbols = []
+        # Deduplicate while preserving order
+        seen = set()
+        out = []
+        for s in symbols:
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
+
+    def create_screener_tab(notebook):
+        tab = tk.Frame(notebook, bg=DEEP_SEA_THEME['primary_bg'])
+        notebook.add(tab, text="Screener")
+        notebook.select(tab)
+
+        # Controls
+        controls = tk.Frame(tab, bg=DEEP_SEA_THEME['secondary_bg'])
+        controls.pack(side=tk.TOP, fill=tk.X)
+
+        tk.Label(controls, text="Universe:", bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_secondary']).pack(side=tk.LEFT, padx=(10, 4), pady=6)
+        uni_var = tk.StringVar(value="Mega-Caps")
+        uni_dropdown = ttk.Combobox(controls, textvariable=uni_var, values=["Mega-Caps", "Tech+Banks", "All (Local)"] , state="readonly", width=14)
+        uni_dropdown.pack(side=tk.LEFT, padx=(0, 8), pady=6)
+
+        tk.Label(controls, text="Min Price:", bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_secondary']).pack(side=tk.LEFT, padx=(6, 4))
+        min_price_var = tk.StringVar(value="0")
+        tk.Entry(controls, textvariable=min_price_var, width=6, bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary']).pack(side=tk.LEFT)
+
+        tk.Label(controls, text="Min %Chg:", bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_secondary']).pack(side=tk.LEFT, padx=(6, 4))
+        min_chg_var = tk.StringVar(value="0")
+        tk.Entry(controls, textvariable=min_chg_var, width=6, bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary']).pack(side=tk.LEFT)
+
+        tk.Label(controls, text="Min Vol:", bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_secondary']).pack(side=tk.LEFT, padx=(6, 4))
+        min_vol_var = tk.StringVar(value="0")
+        tk.Entry(controls, textvariable=min_vol_var, width=8, bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary']).pack(side=tk.LEFT)
+
+        rsi_ob_var = tk.BooleanVar(value=False)
+        rsi_os_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(controls, text="RSI > 70", variable=rsi_ob_var, bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_secondary'], selectcolor=DEEP_SEA_THEME['secondary_bg']).pack(side=tk.LEFT, padx=8)
+        tk.Checkbutton(controls, text="RSI < 30", variable=rsi_os_var, bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_secondary'], selectcolor=DEEP_SEA_THEME['secondary_bg']).pack(side=tk.LEFT)
+
+        status_var = tk.StringVar(value="")
+        tk.Label(controls, textvariable=status_var, bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_secondary']).pack(side=tk.RIGHT, padx=10)
+
+        scan_btn = tk.Button(controls, text="Scan", font=("Segoe UI", 9, "bold"), bg=DEEP_SEA_THEME['info'], fg=DEEP_SEA_THEME['text_primary'], bd=2,
+                             activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['text_primary'])
+        scan_btn.pack(side=tk.RIGHT, padx=6, pady=4)
+
+        # Results table
+        content = tk.Frame(tab, bg=DEEP_SEA_THEME['primary_bg'])
+        content.pack(fill=tk.BOTH, expand=1)
+
+        cols = ("ticker","price","chg%","volume","rsi")
+        tv = ttk.Treeview(content, columns=cols, show='headings')
+        for c, w in [("ticker",100),("price",100),("chg%",100),("volume",140),("rsi",80)]:
+            tv.heading(c, text=c.upper())
+            tv.column(c, width=w, anchor='w')
+        vsb = ttk.Scrollbar(content, orient='vertical', command=tv.yview)
+        tv.configure(yscroll=vsb.set)
+        tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def get_universe(name):
+            if name == "Mega-Caps":
+                return [
+                    "AAPL","MSFT","NVDA","AMZN","META",
+                    "TSLA","GOOGL","BRK-B","LLY","JPM",
+                    "V","WMT","XOM","MA","UNH",
+                    "PG","HD","JNJ","AVGO","COST",
+                ]
+            elif name == "Tech+Banks":
+                return [
+                    "AAPL","MSFT","NVDA","AMZN","META","TSLA","GOOGL","AMD","INTC","CSCO",
+                    "JPM","BAC","WFC","C","GS","MS","V","MA","PYPL","AXP"
+                ]
+            else:
+                syms = _load_symbols_from_local()
+                if not syms:
+                    messagebox.showinfo("Screener", "No local symbol list found. Place symbols.txt or nasdaq_screener.csv in the project folder to enable 'All (Local)'. Falling back to Mega-Caps.")
+                    return get_universe("Mega-Caps")
+                return syms
+
+        def scan_universe():
+            tickers = get_universe(uni_var.get())
+            try:
+                min_price = float(min_price_var.get() or 0)
+            except Exception:
+                min_price = 0
+            try:
+                min_chg = float(min_chg_var.get() or 0)
+            except Exception:
+                min_chg = 0
+            try:
+                min_vol = float(min_vol_var.get() or 0)
+            except Exception:
+                min_vol = 0
+
+            tv.delete(*tv.get_children())
+            status_var.set("Scanning…")
+            scan_btn.config(state=tk.DISABLED)
+
+            results = []
+
+            def worker():
+                total = len(tickers)
+                for i, tkr in enumerate(tickers, start=1):
+                    price = None
+                    chg = None
+                    vol = None
+                    rsi_val = None
+                    try:
+                        t = yf.Ticker(tkr)
+                        hist = t.history(period="60d", interval="1d", prepost=False, repair=True)
+                        if hist is not None and len(hist) >= 2:
+                            price = float(hist['Close'].iloc[-1])
+                            prev = float(hist['Close'].iloc[-2])
+                            chg = ((price - prev) / prev) * 100.0
+                            vol = int(hist['Volume'].iloc[-1])
+                            # RSI from close
+                            ser = pd.Series(hist['Close'])
+                            rsi_series = calculate_simple_rsi(ser)
+                            rsi_val = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else None
+                    except Exception:
+                        pass
+
+                    # Apply filters
+                    if price is None: continue
+                    if price < min_price: continue
+                    if chg is not None and chg < min_chg: continue
+                    if vol is not None and vol < min_vol: continue
+                    if rsi_ob_var.get() and (rsi_val is None or rsi_val <= 70): continue
+                    if rsi_os_var.get() and (rsi_val is None or rsi_val >= 30): continue
+
+                    results.append((tkr, price, chg, vol, rsi_val))
+                    if i % 50 == 0:
+                        # periodic progress update
+                        def _progress():
+                            status_var.set(f"Scanning… {i}/{total}")
+                        tab.after(1, _progress)
+
+                # Update UI on main thread
+                def finish():
+                    for tkr, price, chg, vol, rsi_val in results:
+                        tv.insert('', 'end', values=(tkr, f"{price:.2f}", f"{(chg or 0):+.2f}", f"{vol or 0:,}", f"{(rsi_val or 0):.1f}"))
+                    status_var.set(f"{len(results)} results")
+                    scan_btn.config(state=tk.NORMAL)
+
+                tab.after(10, finish)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        scan_btn.config(command=scan_universe)
+        uni_dropdown.bind('<<ComboboxSelected>>', lambda e: scan_universe())
+        scan_universe()
+
+    def open_screener_tab():
+        global GLOBAL_NOTEBOOK
+        if GLOBAL_NOTEBOOK is None or not GLOBAL_NOTEBOOK.winfo_exists():
+            try:
+                open_stock_layout_with_symbol(symbol)
+            except Exception:
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="2d")
+                if len(hist) >= 2:
+                    prev_close = hist['Close'].iloc[0]
+                    latest_close = hist['Close'].iloc[1]
+                    pg = ((latest_close - prev_close) / prev_close) * 100
+                else:
+                    prev_close = latest_close = 0
+                    pg = 0
+                create_trading_interface(symbol, ticker, prev_close, latest_close, pg, get_ta_signal(symbol), get_rsi(symbol) or 0, get_in_depth_analysis(symbol))
+        # Focus if exists
+        for tab_id in GLOBAL_NOTEBOOK.tabs():
+            if GLOBAL_NOTEBOOK.tab(tab_id, 'text') == 'Screener':
+                GLOBAL_NOTEBOOK.select(tab_id)
+                return
+        create_screener_tab(GLOBAL_NOTEBOOK)
+
+    def create_home_tab(notebook):
+        """Create a lightweight Home dashboard inside the notebook."""
+        tab = tk.Frame(notebook, bg=DEEP_SEA_THEME['primary_bg'])
+        # Determine a unique tab title
+        if not hasattr(notebook, 'home_counter'):
+            notebook.home_counter = 1
+        title = 'Home' if notebook.home_counter == 1 else f"Home {notebook.home_counter}"
+        notebook.home_counter += 1
+        notebook.add(tab, text=title)
+        notebook.select(tab)
+
+        header = tk.Frame(tab, bg=DEEP_SEA_THEME['primary_bg'])
+        header.pack(side=tk.TOP, fill=tk.X, padx=16, pady=(12, 6))
+        tk.Label(header, text=title, font=("Segoe UI", 18, "bold"), fg=DEEP_SEA_THEME['text_primary'], bg=DEEP_SEA_THEME['primary_bg']).pack(side=tk.LEFT)
+
+        # Quick open symbol
+        quick = tk.Frame(header, bg=DEEP_SEA_THEME['primary_bg'])
+        quick.pack(side=tk.RIGHT)
+        tk.Label(quick, text="Open: ", bg=DEEP_SEA_THEME['primary_bg'], fg=DEEP_SEA_THEME['text_secondary']).pack(side=tk.LEFT)
+        open_var = tk.StringVar()
+        ent = tk.Entry(quick, textvariable=open_var, width=10, bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_primary'], insertbackground=DEEP_SEA_THEME['text_accent'])
+        ent.pack(side=tk.LEFT)
+        tk.Button(quick, text="Go", command=lambda: open_symbol_tab(open_var.get().strip().upper()),
+                 font=("Segoe UI", 10, "bold"), bg=DEEP_SEA_THEME['info'], fg=DEEP_SEA_THEME['text_primary'], bd=2,
+                 activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['text_primary']).pack(side=tk.LEFT, padx=6)
+
+        # Cards grid
+        grid = tk.Frame(tab, bg=DEEP_SEA_THEME['primary_bg'])
+        grid.pack(fill=tk.BOTH, expand=1, padx=16, pady=8)
+        for i in range(3):
+            grid.grid_columnconfigure(i, weight=1, uniform="cols")
+        for r in range(2):
+            grid.grid_rowconfigure(r, weight=1)
+
+        # Screeners card
+        scr_outer, scr = make_card(grid, "Screeners", "Find anything with a simple scan", width=340, height=180)
+        scr_outer.grid(row=0, column=0, sticky="nsew", padx=(0, 12), pady=(0, 12))
+        tk.Button(scr, text="Open Screener", command=lambda: open_screener_tab(),
+                  font=("Segoe UI", 11, "bold"), bg=DEEP_SEA_THEME['info'], fg=DEEP_SEA_THEME['text_primary'], bd=2,
+                  activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['text_primary']).pack(anchor='w', padx=14, pady=10)
+
+        # News card
+        news_outer, news_card = make_card(grid, "News Flow", "US stock headlines", width=340, height=180)
+        news_outer.grid(row=0, column=1, sticky="nsew", padx=12, pady=(0, 12))
+        tk.Button(news_card, text="Open News", command=lambda: open_news_tab(),
+                  font=("Segoe UI", 11, "bold"), bg=DEEP_SEA_THEME['info'], fg=DEEP_SEA_THEME['text_primary'], bd=2,
+                  activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['text_primary']).pack(anchor='w', padx=14, pady=10)
+
+        # Heatmaps card
+        heat_outer, heat_card = make_card(grid, "Heatmaps", "Market performance", width=340, height=180)
+        heat_outer.grid(row=0, column=2, sticky="nsew", padx=(12, 0), pady=(0, 12))
+        tk.Button(heat_card, text="Open Heatmap", command=lambda: open_heatmap_tab(),
+                  font=("Segoe UI", 11, "bold"), bg=DEEP_SEA_THEME['success'], fg=DEEP_SEA_THEME['text_primary'], bd=2,
+                  activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['text_primary']).pack(anchor='w', padx=14, pady=10)
+
 
     def create_home_page():
         clear_main_content()
@@ -2003,9 +2966,15 @@ def main_tabbed_chart():
         # Row 1: Screeners (left, span 2 cols) and Calendars (right)
         scr_outer, scr = make_card(grid, "Screeners", "Find anything with a simple scan", width=720, height=220)
         scr_outer.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=(0, 12), pady=(0, 12))
-        # Placeholder pill rows inside screeners
+        # Screener quick actions
+        actions = tk.Frame(scr, bg=DEEP_SEA_THEME['card_bg'])
+        actions.pack(fill=tk.X, padx=14, pady=8)
+        tk.Button(actions, text="Open Screener", command=lambda: open_screener_tab(),
+                  font=("Segoe UI", 11, "bold"), bg=DEEP_SEA_THEME['info'], fg=DEEP_SEA_THEME['text_primary'], bd=2,
+                  activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['text_primary']).pack(side=tk.LEFT, padx=(0, 8))
+        # Popular tickers pills
         pills = tk.Frame(scr, bg=DEEP_SEA_THEME['card_bg'])
-        pills.pack(fill=tk.X, padx=14, pady=8)
+        pills.pack(fill=tk.X, padx=14, pady=(0, 10))
         for txt, col in [("AAPL", DEEP_SEA_THEME['accent_bg']), ("TSLA", DEEP_SEA_THEME['accent_bg']), ("GOOGL", DEEP_SEA_THEME['accent_bg']), ("WMT", DEEP_SEA_THEME['accent_bg'])]:
             tk.Label(pills, text=f"  {txt}  ", bg=col, fg=DEEP_SEA_THEME['text_primary'], font=("Segoe UI", 10, "bold"), bd=0).pack(side=tk.LEFT, padx=6, pady=6)
 
@@ -2015,9 +2984,57 @@ def main_tabbed_chart():
         # Row 2: News Flow (left), Heatmaps (center), Options (right)
         news_outer, news_card = make_card(grid, "News Flow", "US stock headlines", width=340, height=220)
         news_outer.grid(row=1, column=0, sticky="nsew", padx=(0, 12), pady=12)
+        # Add a button to open the live news window
+        news_btn = tk.Button(
+            news_card,
+            text="Open Live News",
+            command=lambda: open_news_tab(),
+            font=("Segoe UI", 11, "bold"),
+            bg=DEEP_SEA_THEME['info'], fg=DEEP_SEA_THEME['text_primary'],
+            activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['text_primary'],
+            bd=2, relief="raised"
+        )
+        news_btn.pack(padx=16, pady=16, anchor="w")
+        # Also allow clicking the card to open
+        news_card.bind("<Button-1>", lambda e: open_news_tab())
 
-        heat_outer, _ = make_card(grid, "Heatmaps", "See the full picture for global markets", width=340, height=220)
+        heat_outer, heat_card = make_card(grid, "Heatmaps", "See the full picture for global markets", width=340, height=220)
         heat_outer.grid(row=1, column=1, sticky="nsew", padx=12, pady=12)
+        heat_btn = tk.Button(
+            heat_card,
+            text="Open Heatmap",
+            command=lambda: open_heatmap_tab(),
+            font=("Segoe UI", 11, "bold"),
+            bg=DEEP_SEA_THEME['success'], fg=DEEP_SEA_THEME['text_primary'],
+            activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['text_primary'],
+            bd=2, relief="raised"
+        )
+        heat_btn.pack(padx=16, pady=16, anchor="w")
+        # Mini preview heatmap
+        preview = tk.Canvas(heat_card, width=300, height=130, bg=DEEP_SEA_THEME['card_bg'], highlightthickness=0)
+        preview.pack(padx=14, pady=(0, 12), anchor="w")
+        labels = ["AAPL","MSFT","NVDA","AMZN","META","TSLA","GOOGL","JPM","WMT","XOM"]
+        cols = 5
+        cell_w = 56
+        cell_h = 52
+        def color_for(p):
+            v = max(-5.0, min(5.0, p))
+            t = (v + 5.0) / 10.0
+            r1,g1,b1 = (231,76,60)
+            r2,g2,b2 = (39,174,96)
+            r = int(r1 + (r2 - r1) * t)
+            g = int(g1 + (g2 - g1) * t)
+            b = int(b1 + (b2 - b1) * t)
+            return f"#{r:02x}{g:02x}{b:02x}"
+        for i, tkr in enumerate(labels):
+            r = i // cols
+            c = i % cols
+            x0 = c * (cell_w + 2)
+            y0 = r * (cell_h + 2)
+            val = round(random.uniform(-2.5, 2.5), 2)
+            preview.create_rectangle(x0, y0, x0+cell_w, y0+cell_h, fill=color_for(val), outline=DEEP_SEA_THEME['border'])
+            preview.create_text(x0+cell_w/2, y0+18, text=tkr, fill=DEEP_SEA_THEME['text_primary'], font=("Segoe UI", 9, "bold"))
+            preview.create_text(x0+cell_w/2, y0+36, text=f"{val:+.2f}%", fill=DEEP_SEA_THEME['text_primary'], font=("Segoe UI", 9))
 
         opts_outer, _ = make_card(grid, "Options", "Build your best strategy", width=340, height=220)
         opts_outer.grid(row=1, column=2, sticky="nsew", padx=(12, 0), pady=12)
@@ -2134,6 +3151,26 @@ def main_tabbed_chart():
 
         notebook = ttk.Notebook(left_area, style="TNotebook")
         notebook.pack(fill=tk.BOTH, expand=1, padx=0, pady=0)
+
+        # Simple header bar with a plus button to go to startup Home page
+        tabs_header = tk.Frame(left_area, bg=DEEP_SEA_THEME['secondary_bg'])
+        def go_to_startup_home():
+            # Redirect to the main startup Home page (outside of tabs)
+            create_home_page()
+        plus_btn = tk.Button(
+            tabs_header, text="+", command=go_to_startup_home, width=3,
+            font=("Segoe UI", 12, "bold"),
+            bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary'],
+            activebackground=DEEP_SEA_THEME['hover'], activeforeground=DEEP_SEA_THEME['text_primary'],
+            bd=1, relief="raised"
+        )
+        plus_btn.pack(side=tk.RIGHT, padx=6, pady=2)
+        # Pack header before the notebook so it appears above the tabs row
+        tabs_header.pack(fill=tk.X, padx=0, pady=(0, 2), before=notebook)
+
+        # Expose notebook globally for adding News/Heatmap tabs from elsewhere
+        global GLOBAL_NOTEBOOK
+        GLOBAL_NOTEBOOK = notebook
 
         show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gain, ta_signal, rsi_val, analysis, notebook, symbol)
 
