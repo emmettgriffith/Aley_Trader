@@ -1,0 +1,17 @@
+# .gitignore
+# Ignore Python cache, virtual environments, and sensitive files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+.env
+.venv/
+*.egg-info/
+.DS_Store
+.idea/
+.vscode/
+*.log
+users.json
+user_data_emmett/
