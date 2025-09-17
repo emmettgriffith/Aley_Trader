@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import logging
+import math
 import subprocess  # Added for spawning new application windows
 import yfinance as yf
 import pandas as pd
@@ -40,6 +41,8 @@ import hmac
 import base64
 import platform
 import overflow_chart  # Add overflow chart module
+import footprint_chart  # Footprint chart module
+from typing import Iterable
 
 # Basic logging configuration
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -95,6 +98,113 @@ def calculate_simple_rsi(prices, period=14):
     except Exception:
         # Return a series of NaN if calculation fails
         return pd.Series([float('nan')] * len(prices), index=prices.index)
+
+
+FOOTPRINT_INTERVAL_MAP = {
+    "15s": "1m",
+    "30s": "1m",
+    "1m": "1m",
+    "5m": "5m",
+}
+
+FOOTPRINT_TICK_CACHE: dict[tuple[str, str], tuple[pd.DataFrame, float, float]] = {}
+FOOTPRINT_CACHE_TTL = 15.0  # seconds
+
+
+def estimate_tick_size(symbol: str, price_samples: Iterable[float]) -> float:
+    """Heuristic for tick size based on symbol and price samples."""
+
+    upper = symbol.upper()
+    if upper.endswith("=F") or upper.startswith(("ES", "NQ", "YM", "RTY")):
+        return 0.25
+
+    prices = [float(p) for p in price_samples if pd.notna(p)]
+    if len(prices) >= 2:
+        diffs = sorted({round(abs(a - b), 6) for a, b in zip(prices[:-1], prices[1:]) if abs(a - b) > 0})
+        if diffs:
+            return max(min(diffs), 0.0001)
+
+    try:
+        latest_price = float(prices[-1]) if prices else float(yf.Ticker(symbol).fast_info.get("lastPrice") or 0)
+    except Exception:
+        latest_price = 0.0
+
+    if latest_price >= 1000:
+        return 0.1
+    if latest_price >= 100:
+        return 0.01
+    if latest_price >= 10:
+        return 0.01
+    if latest_price >= 1:
+        return 0.001
+    return 0.0001
+
+
+def fetch_symbol_ticks(symbol: str, interval: str = "1m", limit: int | None = None) -> tuple[pd.DataFrame, float]:
+    """Fetch synthetic tick data for footprint rendering using yfinance.
+
+    Results are cached briefly so repeated redraws do not refetch from the
+    network. The data is a light approximation derived from minute candles to
+    keep initial load within a few seconds.
+    """
+
+    key = (symbol.upper(), interval)
+    now = time.time()
+    cache_entry = FOOTPRINT_TICK_CACHE.get(key)
+    if cache_entry and now - cache_entry[2] < FOOTPRINT_CACHE_TTL:
+        cached_df, cached_tick, _ = cache_entry
+        return cached_df.copy(deep=True), cached_tick
+
+    yf_interval = FOOTPRINT_INTERVAL_MAP.get(interval, "1m")
+    period = "5d" if yf_interval in ("5m", "15m") else "1d"
+    if limit is None:
+        limit = 90 if interval in ("15s", "30s", "1m") else 150
+
+    try:
+        hist = yf.Ticker(symbol).history(period=period, interval=yf_interval, auto_adjust=False, prepost=True)
+    except Exception as exc:
+        logging.warning("Footprint history fetch failed for %s: %s", symbol, exc)
+        return pd.DataFrame(columns=["ts", "price", "size", "side"]), 0.01
+
+    if hist.empty:
+        return pd.DataFrame(columns=["ts", "price", "size", "side"]), 0.01
+
+    hist = hist.tail(limit)
+    rows = []
+    price_samples = []
+    for ts, row in hist.iterrows():
+        ts = pd.Timestamp(ts)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+
+        volume = float(row.get("Volume", 0.0) or 0.0)
+        slice_volume = max(volume / 6.0, 1.0)
+        price_points = [
+            (row.get("Open"), "ASK"),
+            (row.get("Close"), "ASK" if row.get("Close", 0) >= row.get("Open", 0) else "BID"),
+            (row.get("Low"), "BID"),
+            (row.get("High"), "ASK"),
+        ]
+        for price, side in price_points:
+            if pd.isna(price):
+                continue
+            price_samples.append(price)
+            rows.append({
+                "ts": ts,
+                "price": float(price),
+                "size": slice_volume,
+                "side": side,
+            })
+
+    ticks = pd.DataFrame(rows, columns=["ts", "price", "size", "side"])
+    if not ticks.empty:
+        ticks["ts"] = pd.to_datetime(ticks["ts"], utc=True)
+
+    tick_size = estimate_tick_size(symbol, price_samples)
+    FOOTPRINT_TICK_CACHE[key] = (ticks.copy(deep=True), tick_size, now)
+    return ticks, tick_size
 
 # Load environment variables from .env file in the script's directory
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -622,6 +732,24 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
 
     def draw_chart(chart_type="Candlestick"):
         nonlocal refresh_timer, last_tick_timer
+        footprint_active = chart_type == "Order Flow Footprint"
+        if not footprint_active and hasattr(frame, "footprint_settings"):
+            fp_state = frame.footprint_settings
+            if fp_state.get("frame") and fp_state["frame"].winfo_ismapped():
+                fp_state["frame"].pack_forget()
+            if fp_state.get("fetch_job"):
+                try:
+                    frame.after_cancel(fp_state["fetch_job"])
+                except Exception:
+                    pass
+                fp_state["fetch_job"] = None
+            worker = fp_state.get("worker")
+            if worker:
+                try:
+                    worker.stop()
+                except Exception:
+                    pass
+                fp_state["worker"] = None
         # --- Drawing Toolbar Placeholder (left side) ---
         drawing_tools = [
             ("Trendline", "📈"),
@@ -842,6 +970,9 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
         chart_types = [
             "Candlestick",
             "Volume Profile - Order Book",
+            "Volume Profile Plus",
+            "Order Flow Footprint",
+            "Overflow - Momentum",
             "Overflow - RSI Overbought", 
             "Overflow - RSI Oversold",
             "Overflow - Volume Spike",
@@ -898,7 +1029,58 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                 pady=3
             )
             tf_btn.pack(side=tk.LEFT, padx=1)
-        
+
+        # Footprint chart controls (interval & volume profile toggle)
+        if not hasattr(frame, "footprint_settings"):
+            fp_interval_var = tk.StringVar(value="1m")
+            fp_profile_var = tk.BooleanVar(value=True)
+
+            fp_ctrl_frame = tk.Frame(control_frame, bg=DEEP_SEA_THEME['secondary_bg'])
+            fp_interval_box = ttk.Combobox(
+                fp_ctrl_frame,
+                textvariable=fp_interval_var,
+                values=["15s", "30s", "1m", "5m"],
+                state="readonly",
+                width=6
+            )
+            fp_interval_box.pack(side=tk.LEFT, padx=(0, 6), pady=2)
+
+            fp_profile_toggle = tk.Checkbutton(
+                fp_ctrl_frame,
+                text="Volume Profile",
+                variable=fp_profile_var,
+                onvalue=True,
+                offvalue=False,
+                bg=DEEP_SEA_THEME['secondary_bg'],
+                fg=DEEP_SEA_THEME['text_primary'],
+                selectcolor=DEEP_SEA_THEME['surface_bg'],
+                activebackground=DEEP_SEA_THEME['hover'],
+                activeforeground=DEEP_SEA_THEME['text_primary'],
+                font=("Segoe UI", 9)
+            )
+            fp_profile_toggle.pack(side=tk.LEFT, padx=(0, 6))
+
+            frame.footprint_settings = {
+                "frame": fp_ctrl_frame,
+                "interval_var": fp_interval_var,
+                "show_profile_var": fp_profile_var,
+                "interval_box": fp_interval_box,
+                "profile_toggle": fp_profile_toggle,
+                "worker": None,
+                "fetch_job": None,
+            }
+
+            def on_fp_interval_change(event=None):
+                if current_chart_type.get() == "Order Flow Footprint":
+                    frame.after(10, lambda: draw_chart("Order Flow Footprint"))
+
+            def on_fp_profile_toggle():
+                if current_chart_type.get() == "Order Flow Footprint":
+                    frame.after(10, lambda: draw_chart("Order Flow Footprint"))
+
+            fp_interval_box.bind('<<ComboboxSelected>>', on_fp_interval_change)
+            fp_profile_toggle.configure(command=on_fp_profile_toggle)
+
 
         # Indicator dropdown button (beside Add Tab)
         def open_indicator_menu(event=None):
@@ -1057,6 +1239,145 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             return
             
         # Handle different chart types
+        if chart_type == "Order Flow Footprint":
+            fp_state = frame.footprint_settings
+            fp_ctrl = fp_state["frame"]
+            if not fp_ctrl.winfo_ismapped():
+                fp_ctrl.pack(side=tk.LEFT, padx=(12, 8), pady=2)
+
+            interval_choice = fp_state["interval_var"].get()
+            show_profile_var = fp_state["show_profile_var"]
+
+            chart_container = tk.Frame(frame, bg=DEEP_SEA_THEME['primary_bg'])
+            chart_container.pack(fill=tk.BOTH, expand=1)
+
+            def update_canvas(fig):
+                if not chart_container.winfo_exists():
+                    plt.close(fig)
+                    return
+                for child in chart_container.winfo_children():
+                    child.destroy()
+                canvas = FigureCanvasTkAgg(fig, master=chart_container)
+                canvas.draw()
+                canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
+                fp_state['canvas'] = canvas
+                plt.close(fig)
+
+            ticks_df, inferred_tick = fetch_symbol_ticks(symbol, interval_choice)
+            tick_size = inferred_tick if inferred_tick > 0 else 0.01
+
+            if ticks_df.empty:
+                msg = tk.Label(
+                    chart_container,
+                    text="No footprint data available",
+                    bg=DEEP_SEA_THEME['primary_bg'],
+                    fg=DEEP_SEA_THEME['danger'],
+                    font=("Segoe UI", 12)
+                )
+                msg.pack(expand=1)
+                status_label.config(text=f"Footprint unavailable for {interval_choice}")
+            else:
+                initial_fig = footprint_chart.render_footprint(
+                    ticks_df,
+                    tick_size=tick_size,
+                    interval=interval_choice,
+                    show_volume_profile=show_profile_var.get(),
+                )
+                update_canvas(initial_fig)
+                status_label.config(text=f"Footprint {interval_choice.upper()} ready")
+
+            worker = fp_state.get("worker")
+            if worker is None:
+                worker = footprint_chart.FootprintRenderWorker(
+                    tick_size=tick_size,
+                    interval=interval_choice,
+                    show_profile_fn=lambda: fp_state["show_profile_var"].get(),
+                    update_callback=lambda fig: frame.after(0, lambda f=fig: update_canvas(f)),
+                    batch_ms=400,
+                    max_ticks=12000,
+                    max_bars=60,
+                )
+                fp_state["worker"] = worker
+                worker.start()
+            else:
+                worker.set_tick_size(tick_size)
+                worker.set_interval(interval_choice)
+                worker.set_max_bars(60)
+
+            if not ticks_df.empty:
+                worker.submit(ticks_df)
+
+            if fp_state.get("fetch_job"):
+                try:
+                    frame.after_cancel(fp_state["fetch_job"])
+                except Exception:
+                    pass
+                fp_state["fetch_job"] = None
+
+            def schedule_tick_refresh():
+                if not chart_container.winfo_exists():
+                    return
+                worker_ref = fp_state.get("worker")
+                if worker_ref is None:
+                    return
+                fresh_ticks, _ = fetch_symbol_ticks(symbol, fp_state["interval_var"].get())
+                if not fresh_ticks.empty:
+                    worker_ref.submit(fresh_ticks)
+                fp_state["fetch_job"] = frame.after(5000, schedule_tick_refresh)
+
+            fp_state["fetch_job"] = frame.after(500, schedule_tick_refresh)
+            return
+
+        if chart_type == "Volume Profile Plus":
+            try:
+                plt.close('all')
+                fig, axes, stats = overflow_chart.plot_volume_profile_plus(
+                    chart_hist,
+                    price_col="Close",
+                    volume_col="Volume",
+                    open_col="Open",
+                    high_col="High",
+                    low_col="Low",
+                    bins=40,
+                    title=f"{symbol} - Volume Profile Plus ({current_timeframe.get().upper()})",
+                    figsize=(width, height)
+                )
+
+                fig.patch.set_facecolor(DEEP_SEA_THEME['primary_bg'])
+                for ax in axes:
+                    ax.set_facecolor(DEEP_SEA_THEME['primary_bg'])
+                    ax.tick_params(colors=DEEP_SEA_THEME['text_primary'])
+                    ax.xaxis.label.set_color(DEEP_SEA_THEME['text_primary'])
+                    ax.yaxis.label.set_color(DEEP_SEA_THEME['text_primary'])
+                    ax.title.set_color(DEEP_SEA_THEME['text_primary'])
+                    ax.grid(True, color=DEEP_SEA_THEME['border'], linestyle='--', linewidth=0.3, alpha=0.4)
+
+                canvas = FigureCanvasTkAgg(fig, master=frame)
+                canvas.draw()
+                canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
+
+                total_buy = stats.get('total_buy_volume', 0.0)
+                total_sell = stats.get('total_sell_volume', 0.0)
+                dominance = stats.get('buy_sell_ratio', 0.0)
+                status_label.config(
+                    text=(
+                        f"{status_text} | Buy {total_buy:,.0f} vs Sell {total_sell:,.0f} "
+                        f"({dominance:+.1f}% net)"
+                    )
+                )
+
+            except Exception as e:
+                print(f"Error creating volume profile plus chart: {e}")
+                error_label = tk.Label(
+                    frame,
+                    text=f"Error rendering Volume Profile Plus: {e}",
+                    bg=DEEP_SEA_THEME['primary_bg'],
+                    fg=DEEP_SEA_THEME['danger'],
+                    font=("Segoe UI", 12)
+                )
+                error_label.pack(expand=1)
+            return
+
         if chart_type == "Volume Profile - Order Book":
             # Render volume profile chart
             try:
@@ -1115,6 +1436,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                 })
                 
                 # Determine threshold based on chart type
+                ylabel = "Value"
                 if "RSI Overbought" in chart_type:
                     # Calculate RSI and use overbought threshold
                     if 'RSI' in chart_hist.columns:
@@ -1130,6 +1452,12 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                     threshold = chart_hist['Volume'].quantile(0.8)
                 elif "Price Breakout" in chart_type:
                     threshold = chart_hist['Close'].quantile(0.9)
+                elif "Momentum" in chart_type:
+                    momentum = chart_hist['Close'].pct_change().fillna(0)
+                    momentum = momentum.rolling(3, min_periods=1).mean() * 100
+                    overflow_df['value'] = momentum
+                    threshold = momentum.quantile(0.85)
+                    ylabel = "Momentum (%)"
                 else:
                     threshold = chart_hist['Close'].mean()
                 
@@ -1145,7 +1473,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                         y="value",
                         threshold=threshold,
                         title=f"{symbol} - {chart_type} ({current_timeframe.get().upper()})",
-                        ylabel="Value",
+                        ylabel=ylabel,
                         xlabel="Date",
                         figsize=(width, height),
                         use_seaborn_theme=False
@@ -2718,6 +3046,38 @@ def main_tabbed_chart():
         header = tk.Frame(tab, bg=DEEP_SEA_THEME['primary_bg'])
         header.pack(side=tk.TOP, fill=tk.X, padx=16, pady=(12, 6))
         tk.Label(header, text=title, font=("Segoe UI", 18, "bold"), fg=DEEP_SEA_THEME['text_primary'], bg=DEEP_SEA_THEME['primary_bg']).pack(side=tk.LEFT)
+
+        # Utilities -----------------------------------------------------
+        def open_symbol_tab(target_symbol: str):
+            target = (target_symbol or "").strip().upper()
+            if not target:
+                return
+            try:
+                ticker_obj = yf.Ticker(target)
+                hist = ticker_obj.history(period="2d")
+                if len(hist) >= 2:
+                    prev_close = hist['Close'].iloc[0]
+                    latest_close = hist['Close'].iloc[1]
+                    percent_gain = ((latest_close - prev_close) / prev_close) * 100
+                else:
+                    prev_close = latest_close = 0.0
+                    percent_gain = 0.0
+                ta_signal = get_ta_signal(target)
+                rsi_val = get_rsi(target) or 0
+                analysis = get_in_depth_analysis(target)
+                create_trading_interface(
+                    target,
+                    ticker_obj,
+                    prev_close,
+                    latest_close,
+                    percent_gain,
+                    ta_signal,
+                    rsi_val,
+                    analysis,
+                )
+            except Exception as exc:
+                logging.error("Failed to open symbol %s: %s", target, exc)
+                messagebox.showerror("Error", f"Unable to open {target}. Please check the symbol and try again.")
 
         # Quick open symbol
         quick = tk.Frame(header, bg=DEEP_SEA_THEME['primary_bg'])
