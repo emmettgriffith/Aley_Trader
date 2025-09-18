@@ -25,6 +25,11 @@ import tkinter.simpledialog as simpledialog
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Rectangle
 import numpy as np  # <-- Add this import
+try:
+    import scipy  # noqa: F401 - presence check for yfinance repair
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
 from dotenv import load_dotenv
 import json
 import os
@@ -565,6 +570,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
         tf_config = timeframe_mapping[tf]
         
         try:
+            data_note = ""
             # Optimized data fetching - simplified and faster
             include_prepost = tf in ["1m", "5m", "10m", "15m", "30m", "1h"]
             
@@ -572,21 +578,47 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             
             # Try multiple data fetching strategies for robustness
             chart_hist = None
+            
+            def fetch_history_safe(params):
+                """Call ticker.history with compatibility fallbacks."""
+                try:
+                    return ticker.history(**params)
+                except TypeError as type_err:
+                    if "unexpected keyword argument 'repair'" in str(type_err).lower() and "repair" in params:
+                        print("  'repair' unsupported by yfinance version; retrying without it")
+                        retry_params = dict(params)
+                        retry_params.pop("repair", None)
+                        return ticker.history(**retry_params)
+                    raise
+                except ModuleNotFoundError as mod_err:
+                    if "scipy" in str(mod_err).lower() and "repair" in params:
+                        print("  SciPy missing; retrying history fetch without repair")
+                        retry_params = dict(params)
+                        retry_params.pop("repair", None)
+                        return ticker.history(**retry_params)
+                    raise
+
+            def build_strategy(period, interval, prepost, allow_repair=True):
+                strat = {"period": period, "interval": interval, "prepost": prepost}
+                if allow_repair and SCIPY_AVAILABLE:
+                    strat["repair"] = True
+                return strat
+
             strategies = [
                 # Strategy 1: Original request
-                {"period": tf_config["period"], "interval": tf_config["interval"], "prepost": include_prepost, "repair": True},
+                build_strategy(tf_config["period"], tf_config["interval"], include_prepost),
                 # Strategy 2: Shorter period, same interval
-                {"period": "5d", "interval": tf_config["interval"], "prepost": include_prepost, "repair": True},
+                build_strategy("5d", tf_config["interval"], include_prepost),
                 # Strategy 3: Even shorter period
-                {"period": "2d", "interval": tf_config["interval"], "prepost": include_prepost, "repair": True},
+                build_strategy("2d", tf_config["interval"], include_prepost),
                 # Strategy 4: Daily fallback
-                {"period": "30d", "interval": "1d", "prepost": False, "repair": True}
+                build_strategy("30d", "1d", False),
             ]
             
             for i, strategy in enumerate(strategies):
                 try:
                     print(f"  Trying strategy {i+1}: {strategy}")
-                    temp_hist = ticker.history(**strategy)
+                    temp_hist = fetch_history_safe(strategy)
                     if not temp_hist.empty and len(temp_hist) > 0:
                         chart_hist = temp_hist
                         print(f"  Success! Got {len(chart_hist)} data points")
@@ -597,20 +629,51 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                     print(f"  Strategy {i+1} failed: {strategy_error}")
                     continue
             
+            if chart_hist is None or len(chart_hist) < 2:
+                print(f"Primary fetch returned insufficient data ({'none' if chart_hist is None else len(chart_hist)} bars). Trying extended daily fallback...")
+                try:
+                    daily_fallback = fetch_history_safe(build_strategy("2y", "1d", False, allow_repair=False))
+                except Exception as daily_err:
+                    print(f"  Daily fallback failed: {daily_err}")
+                    daily_fallback = pd.DataFrame()
+                if daily_fallback is not None and not daily_fallback.empty:
+                    chart_hist = daily_fallback
+                    data_note = "daily fallback"
+                    print(f"  Daily fallback succeeded with {len(chart_hist)} bars")
+            
             if chart_hist is None or chart_hist.empty:
                 print(f"All strategies failed for {tf}, creating minimal test data...")
                 # Create minimal test data to prevent crash
                 from datetime import datetime, timedelta
                 dates = pd.date_range(start=datetime.now() - timedelta(days=5), end=datetime.now(), freq='D')
+                base_price = None
+                try:
+                    if latest_close is not None:
+                        base_price = float(latest_close)
+                    elif prev_close is not None:
+                        base_price = float(prev_close)
+                except Exception:
+                    base_price = None
+                if base_price is None:
+                    base_price = 100.0
+
+                trend = np.linspace(-1.5, 1.5, len(dates))
+                close_vals = base_price + trend
+                open_vals = np.concatenate([[close_vals[0]], close_vals[:-1]])
+                high_vals = np.maximum(open_vals, close_vals) + 0.8
+                low_vals = np.minimum(open_vals, close_vals) - 0.8
+                volume_vals = np.linspace(800_000, 1_400_000, len(dates))
+
                 chart_hist = pd.DataFrame({
-                    'Open': [100] * len(dates),
-                    'High': [105] * len(dates), 
-                    'Low': [95] * len(dates),
-                    'Close': [102] * len(dates),
-                    'Volume': [1000000] * len(dates)
+                    'Open': open_vals,
+                    'High': high_vals,
+                    'Low': low_vals,
+                    'Close': close_vals,
+                    'Volume': volume_vals
                 }, index=dates)
                 print(f"Created {len(chart_hist)} test data points")
-            
+                data_note = "synthetic"
+
             print(f"Final data check: {len(chart_hist)} data points for {tf}")
             
             # Handle custom aggregation more efficiently
@@ -663,7 +726,8 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             chart_hist['Date'] = mdates.date2num(chart_hist['Date'])
             
             # Simplified volume profile - fewer bins for speed
-            num_bins = min(20, len(chart_hist) // 3)  # Reduced bins
+            raw_bins = len(chart_hist) // 3
+            num_bins = min(20, raw_bins if raw_bins >= 2 else 2)
             price_bins = np.linspace(chart_hist['Low'].min(), chart_hist['High'].max(), num_bins)
             volume_profile = np.zeros(len(price_bins) - 1)
             
@@ -677,7 +741,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             high_vol_price = (price_bins[high_vol_idx] + price_bins[high_vol_idx+1]) / 2 if len(price_bins) > 1 else 0
             low_vol_price = (price_bins[low_vol_idx] + price_bins[low_vol_idx+1]) / 2 if len(price_bins) > 1 else 0
             
-            return chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price
+            return chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price, data_note
         except Exception as e:
             print(f"Error fetching data for {tf}: {e}")
             # Fallback to daily data with error handling
@@ -720,7 +784,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                     high_vol_price = 0
                     low_vol_price = 0
                 
-                return chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price
+                return chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price, "daily fallback"
             except Exception as fallback_error:
                 print(f"Fallback failed: {fallback_error}")
                 # Return empty data structure to prevent crash
@@ -728,7 +792,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                     'Date': [mdates.date2num(datetime.now())],
                     'Open': [100], 'High': [100], 'Low': [100], 'Close': [100], 'Volume': [0]
                 })
-                return empty_df, np.array([99, 101]), np.array([0]), 100, 100
+                return empty_df, np.array([99, 101]), np.array([0]), 100, 100, "synthetic"
 
     def draw_chart(chart_type="Candlestick"):
         nonlocal refresh_timer, last_tick_timer
@@ -1031,55 +1095,56 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             tf_btn.pack(side=tk.LEFT, padx=1)
 
         # Footprint chart controls (interval & volume profile toggle)
-        if not hasattr(frame, "footprint_settings"):
-            fp_interval_var = tk.StringVar(value="1m")
-            fp_profile_var = tk.BooleanVar(value=True)
+        # Recreate the UI each redraw but preserve state objects/workers.
+        fp_state = getattr(frame, "footprint_settings", None) or {}
+        fp_interval_var = fp_state.get("interval_var") or tk.StringVar(value="1m")
+        fp_profile_var = fp_state.get("show_profile_var") or tk.BooleanVar(value=True)
 
-            fp_ctrl_frame = tk.Frame(control_frame, bg=DEEP_SEA_THEME['secondary_bg'])
-            fp_interval_box = ttk.Combobox(
-                fp_ctrl_frame,
-                textvariable=fp_interval_var,
-                values=["15s", "30s", "1m", "5m"],
-                state="readonly",
-                width=6
-            )
-            fp_interval_box.pack(side=tk.LEFT, padx=(0, 6), pady=2)
+        fp_ctrl_frame = tk.Frame(control_frame, bg=DEEP_SEA_THEME['secondary_bg'])
+        fp_interval_box = ttk.Combobox(
+            fp_ctrl_frame,
+            textvariable=fp_interval_var,
+            values=["15s", "30s", "1m", "5m"],
+            state="readonly",
+            width=6
+        )
+        fp_interval_box.pack(side=tk.LEFT, padx=(0, 6), pady=2)
 
-            fp_profile_toggle = tk.Checkbutton(
-                fp_ctrl_frame,
-                text="Volume Profile",
-                variable=fp_profile_var,
-                onvalue=True,
-                offvalue=False,
-                bg=DEEP_SEA_THEME['secondary_bg'],
-                fg=DEEP_SEA_THEME['text_primary'],
-                selectcolor=DEEP_SEA_THEME['surface_bg'],
-                activebackground=DEEP_SEA_THEME['hover'],
-                activeforeground=DEEP_SEA_THEME['text_primary'],
-                font=("Segoe UI", 9)
-            )
-            fp_profile_toggle.pack(side=tk.LEFT, padx=(0, 6))
+        fp_profile_toggle = tk.Checkbutton(
+            fp_ctrl_frame,
+            text="Volume Profile",
+            variable=fp_profile_var,
+            onvalue=True,
+            offvalue=False,
+            bg=DEEP_SEA_THEME['secondary_bg'],
+            fg=DEEP_SEA_THEME['text_primary'],
+            selectcolor=DEEP_SEA_THEME['surface_bg'],
+            activebackground=DEEP_SEA_THEME['hover'],
+            activeforeground=DEEP_SEA_THEME['text_primary'],
+            font=("Segoe UI", 9)
+        )
+        fp_profile_toggle.pack(side=tk.LEFT, padx=(0, 6))
 
-            frame.footprint_settings = {
-                "frame": fp_ctrl_frame,
-                "interval_var": fp_interval_var,
-                "show_profile_var": fp_profile_var,
-                "interval_box": fp_interval_box,
-                "profile_toggle": fp_profile_toggle,
-                "worker": None,
-                "fetch_job": None,
-            }
+        frame.footprint_settings = {
+            "frame": fp_ctrl_frame,
+            "interval_var": fp_interval_var,
+            "show_profile_var": fp_profile_var,
+            "interval_box": fp_interval_box,
+            "profile_toggle": fp_profile_toggle,
+            "worker": fp_state.get("worker"),
+            "fetch_job": fp_state.get("fetch_job"),
+        }
 
-            def on_fp_interval_change(event=None):
-                if current_chart_type.get() == "Order Flow Footprint":
-                    frame.after(10, lambda: draw_chart("Order Flow Footprint"))
+        def on_fp_interval_change(event=None):
+            if current_chart_type.get() == "Order Flow Footprint":
+                frame.after(10, lambda: draw_chart("Order Flow Footprint"))
 
-            def on_fp_profile_toggle():
-                if current_chart_type.get() == "Order Flow Footprint":
-                    frame.after(10, lambda: draw_chart("Order Flow Footprint"))
+        def on_fp_profile_toggle():
+            if current_chart_type.get() == "Order Flow Footprint":
+                frame.after(10, lambda: draw_chart("Order Flow Footprint"))
 
-            fp_interval_box.bind('<<ComboboxSelected>>', on_fp_interval_change)
-            fp_profile_toggle.configure(command=on_fp_profile_toggle)
+        fp_interval_box.bind('<<ComboboxSelected>>', on_fp_interval_change)
+        fp_profile_toggle.configure(command=on_fp_profile_toggle)
 
 
         # Indicator dropdown button (beside Add Tab)
@@ -1227,10 +1292,12 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             draw_chart("Candlestick")  # Redraw to update button state
         
         try:
-            chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price = fetch_chart_data()
+            chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price, data_note = fetch_chart_data()
             tf = current_timeframe.get()
             has_prepost = tf in ["1m", "5m", "10m", "15m", "20m", "30m", "1h"]
             status_text = f"OK {tf.upper()} - {len(chart_hist)} bars"
+            if data_note:
+                status_text += f" ({data_note})"
             if has_prepost:
                 status_text += " (Extended Hours)"
         except Exception as e:
@@ -1284,7 +1351,8 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                     show_volume_profile=show_profile_var.get(),
                 )
                 update_canvas(initial_fig)
-                status_label.config(text=f"Footprint {interval_choice.upper()} ready")
+                note_suffix = f" ({data_note})" if data_note else ""
+                status_label.config(text=f"Footprint {interval_choice.upper()} ready{note_suffix}")
 
             worker = fp_state.get("worker")
             if worker is None:
@@ -1513,7 +1581,8 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                             interval = 300000
                         refresh_timer = frame.after(interval, lambda: draw_chart(chart_type))
                     
-                    status_label.config(text=f"OK {chart_type} loaded successfully")
+                    suffix = f" ({data_note})" if data_note else ""
+                    status_label.config(text=f"OK {chart_type} loaded successfully{suffix}")
                     return
                 else:
                     print("Warning: No data available for overflow chart, falling back to candlestick")
