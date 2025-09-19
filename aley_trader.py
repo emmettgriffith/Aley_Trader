@@ -2,8 +2,10 @@
 import logging
 import math
 import subprocess  # Added for spawning new application windows
+import importlib
 import yfinance as yf
 import pandas as pd
+import datetime
 # Import pandas_ta with error handling
 try:
     import pandas_ta as ta
@@ -47,7 +49,711 @@ import base64
 import platform
 import overflow_chart  # Add overflow chart module
 import footprint_chart  # Footprint chart module
-from typing import Iterable
+from typing import Iterable, TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ibapi.client import EClient as _TypeEClient  # pragma: no cover
+    from ibapi.wrapper import EWrapper as _TypeEWrapper  # pragma: no cover
+    from ibapi.contract import Contract as _TypeContract  # pragma: no cover
+    from ibapi.ticktype import TickTypeEnum as _TypeTickTypeEnum  # pragma: no cover
+else:
+    _TypeEClient = _TypeEWrapper = _TypeContract = _TypeTickTypeEnum = None  # type: ignore
+
+try:
+    from ibapi.client import EClient as _EClient  # type: ignore
+    from ibapi.wrapper import EWrapper as _EWrapper  # type: ignore
+    from ibapi.contract import Contract as _Contract  # type: ignore
+    from ibapi.ticktype import TickTypeEnum as _TickTypeEnum  # type: ignore
+    IBAPI_AVAILABLE = True
+except ImportError:
+    _EClient = _EWrapper = _Contract = _TickTypeEnum = None
+    IBAPI_AVAILABLE = False
+
+EClient = _EClient  # type: ignore[assignment]
+EWrapper = _EWrapper  # type: ignore[assignment]
+Contract = _Contract  # type: ignore[assignment]
+TickTypeEnum = _TickTypeEnum  # type: ignore[assignment]
+
+YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
+REALTIME_QUOTE_CACHE: dict[str, tuple[float | None, float, dict | None]] = {}
+REALTIME_QUOTE_TTL = 6.0  # seconds
+
+
+class MarketDataHandle:
+    """Lightweight wrapper that exposes a ticker-like interface for providers."""
+
+    def __init__(self, provider: "MarketDataProvider", symbol: str):
+        self._provider = provider
+        self.symbol = symbol
+        self._raw = None
+
+    def history(self, *args, **kwargs):
+        return self._provider.get_history(self.symbol, *args, **kwargs)
+
+    def get_info(self, *args, **kwargs):
+        return self._provider.get_quote(self.symbol, *args, **kwargs)
+
+    @property
+    def fast_info(self):
+        return self._provider.get_fast_info(self.symbol)
+
+    @property
+    def info(self):
+        return self.get_info()
+
+    def _get_raw(self):
+        if self._raw is None:
+            self._raw = self._provider.get_raw_ticker(self.symbol)
+        return self._raw
+
+    def __getattr__(self, item):
+        raw = self._get_raw()
+        if raw is not None and hasattr(raw, item):
+            return getattr(raw, item)
+        raise AttributeError(item)
+
+
+class MarketDataProvider:
+    """Base provider definition. Custom broker integrations should subclass this."""
+
+    def __init__(self):
+        self._handle_cache: dict[str, MarketDataHandle] = {}
+
+    def configure(self, config: dict | None):
+        """Optional hook for provider-specific configuration (API keys, etc.)."""
+
+    def get_handle(self, symbol: str) -> MarketDataHandle:
+        key = symbol.upper()
+        handle = self._handle_cache.get(key)
+        if handle is None:
+            handle = MarketDataHandle(self, symbol)
+            self._handle_cache[key] = handle
+        return handle
+
+    # --- Methods to override ---
+    def get_history(self, symbol: str, *args, **kwargs):
+        raise NotImplementedError
+
+    def get_quote(self, symbol: str, *args, **kwargs) -> dict:
+        return {}
+
+    def get_fast_info(self, symbol: str) -> dict:
+        return {}
+
+    def get_raw_ticker(self, symbol: str):
+        return None
+
+    def get_last_price(self, symbol: str) -> float | None:
+        # Default implementation pulls from fast info or quote if available
+        info = self.get_fast_info(symbol)
+        price_keys = [
+            "lastPrice",
+            "last_price",
+            "regularMarketPrice",
+            "lastTradePrice",
+            "last_trade_price",
+        ]
+        for key in price_keys:
+            val = info.get(key)
+            if val is not None:
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    continue
+        quote = self.get_quote(symbol)
+        if isinstance(quote, dict):
+            for key in ("regularMarketPrice", "preMarketPrice", "postMarketPrice"):
+                val = quote.get(key)
+                if val is not None:
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        continue
+        return None
+
+    def preferred_refresh_interval_ms(self) -> int:
+        """Suggested refresh interval for real-time UI updates."""
+        return 5000
+
+    def supports_order_book(self) -> bool:
+        return False
+
+    def get_order_book(self, symbol: str, depth: int = 10) -> list[dict[str, float]]:
+        raise NotImplementedError("Order book not supported by this provider")
+
+    def provider_name(self) -> str:
+        return self.__class__.__name__
+
+
+class YFinanceProvider(MarketDataProvider):
+    """Default market data provider based on yfinance."""
+
+    def __init__(self):
+        super().__init__()
+        self._ticker_cache: dict[str, yf.Ticker] = {}
+
+    def _get_ticker(self, symbol: str) -> yf.Ticker:
+        key = symbol.upper()
+        ticker = self._ticker_cache.get(key)
+        if ticker is None:
+            ticker = yf.Ticker(symbol)
+            self._ticker_cache[key] = ticker
+        return ticker
+
+    def get_raw_ticker(self, symbol: str):
+        return self._get_ticker(symbol)
+
+    def provider_name(self) -> str:
+        return "Yahoo Finance"
+
+    def get_history(self, symbol: str, *args, **kwargs):
+        ticker = self._get_ticker(symbol)
+        return ticker.history(*args, **kwargs)
+
+    def get_quote(self, symbol: str, *args, **kwargs) -> dict:
+        ticker = self._get_ticker(symbol)
+        try:
+            data = ticker.get_info()
+            if isinstance(data, dict):
+                quote = dict(data)
+                if quote.get("preMarketChangePercent") is None and quote.get("preMarketChange") is not None:
+                    try:
+                        change = float(quote.get("preMarketChange") or 0)
+                        base = float(quote.get("preMarketPrice") or quote.get("regularMarketPreviousClose") or 0)
+                        quote["preMarketChangePercent"] = (change / base) * 100 if base else None
+                    except Exception:
+                        pass
+                return quote
+        except Exception:
+            logging.debug("yfinance get_info failed for %s", symbol, exc_info=True)
+        return {}
+
+    def get_fast_info(self, symbol: str) -> dict:
+        ticker = self._get_ticker(symbol)
+        try:
+            info = ticker.fast_info
+            if info is None:
+                return {}
+            if isinstance(info, dict):
+                return dict(info)
+            # yfinance returns a SimpleNamespace-like object; convert via vars
+            return dict(getattr(info, "__dict__", {}))
+        except Exception:
+            logging.debug("yfinance fast_info failed for %s", symbol, exc_info=True)
+            return {}
+
+
+if IBAPI_AVAILABLE:
+
+    class _IBKRClient(EWrapper, EClient):
+        def __init__(self, provider: "IBKRMarketDataProvider"):
+            EWrapper.__init__(self)
+            EClient.__init__(self, self)
+            self.provider = provider
+
+        def nextValidId(self, orderId: int):  # noqa: N802 (IB API naming)
+            super().nextValidId(orderId)
+            self.provider._on_next_valid_id(orderId)
+
+        def historicalData(self, reqId, bar):  # noqa: N802
+            self.provider._on_historical_data(reqId, bar)
+
+        def historicalDataEnd(self, reqId, start, end):  # noqa: N802
+            self.provider._on_historical_end(reqId)
+
+        def tickPrice(self, reqId, tickType, price, attrib):  # noqa: N802
+            self.provider._on_tick_price(reqId, tickType, price)
+
+        def tickSize(self, reqId, tickType, size):  # noqa: N802
+            self.provider._on_tick_size(reqId, tickType, size)
+
+        def tickSnapshotEnd(self, reqId):  # noqa: N802
+            self.provider._on_tick_snapshot_end(reqId)
+
+        def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):  # noqa: N802
+            self.provider._on_error(reqId, errorCode, errorString)
+
+        def updateMktDepth(self, reqId, position, operation, side, price, size):  # noqa: N802
+            self.provider._on_depth_update(reqId, position, operation, side, price, size)
+
+        def updateMktDepthL2(self, reqId, position, marketMaker, operation, side, price, size):  # noqa: N802
+            self.provider._on_depth_update(reqId, position, operation, side, price, size, market_maker=marketMaker)
+
+
+    class IBKRMarketDataProvider(MarketDataProvider):
+        """Interactive Brokers market data provider using the TWS/IB Gateway API."""
+
+        def __init__(self):
+            super().__init__()
+            self._config: dict = {
+                "host": "127.0.0.1",
+                "port": 7497,
+                "client_id": 87,
+                "exchange": "SMART",
+                "currency": "USD",
+                "secType": "STK",
+                "primaryExchange": "",
+                "market_data_type": 1,
+                "timeout": 10.0,
+            }
+            self._client: _IBKRClient | None = None
+            self._client_lock = threading.Lock()
+            self._loop_thread: threading.Thread | None = None
+            self._req_id = 1000
+            self._req_lock = threading.Lock()
+            self._pending: dict[int, dict] = {}
+            self._connected_event = threading.Event()
+
+        def configure(self, config: dict | None):
+            if not config:
+                return
+            try:
+                self._config.update(config)
+            except Exception as exc:
+                logging.warning("Failed to apply IBKR provider config: %s", exc)
+            # Ensure ints
+            for key in ("port", "client_id", "market_data_type"):
+                if key in self._config:
+                    try:
+                        self._config[key] = int(self._config[key])
+                    except Exception:
+                        pass
+            for key in ("timeout", "dom_timeout"):
+                if key in self._config:
+                    try:
+                        self._config[key] = float(self._config[key])
+                    except Exception:
+                        pass
+
+        # --- Connection helpers -------------------------------------------------
+        def _ensure_client(self) -> _IBKRClient:
+            if not IBAPI_AVAILABLE:
+                raise RuntimeError("ibapi package not available. Install ibapi to use IBKR provider.")
+            with self._client_lock:
+                if self._client is not None and self._client.isConnected():
+                    return self._client
+                client = _IBKRClient(self)
+                host = self._config.get("host", "127.0.0.1")
+                port = int(self._config.get("port", 7497))
+                client_id = int(self._config.get("client_id", 87))
+                client.connect(host, port, client_id)
+                self._client = client
+                self._connected_event.clear()
+                self._loop_thread = threading.Thread(target=client.run, daemon=True, name="IBKR-MarketData")
+                self._loop_thread.start()
+                # Wait briefly for connection handshake
+                if not self._connected_event.wait(timeout=5.0):
+                    logging.warning("IBKR provider connection handshake timed out; continuing anyway")
+                md_type = int(self._config.get("market_data_type", 1))
+                try:
+                    client.reqMarketDataType(md_type)
+                except Exception:
+                    logging.debug("Failed to set IB market data type", exc_info=True)
+                return client
+
+        def _next_req_id(self) -> int:
+            with self._req_lock:
+                self._req_id += 1
+                return self._req_id
+
+        def _build_contract(self, symbol: str, overrides: dict | None = None):
+            cfg = dict(self._config)
+            if overrides:
+                cfg.update(overrides)
+            if Contract is None:
+                raise RuntimeError("ibapi.Contract not available. Ensure ibapi is installed and configured.")
+            contract = Contract()
+            contract.symbol = symbol
+            contract.secType = cfg.get("secType", "STK")
+            contract.exchange = cfg.get("exchange", "SMART")
+            contract.currency = cfg.get("currency", "USD")
+            primary = cfg.get("primaryExchange")
+            if primary:
+                contract.primaryExchange = primary
+            return contract
+
+        def _register_pending(self, req_id: int, kind: str) -> dict:
+            record = {"kind": kind, "event": threading.Event(), "error": None}
+            if kind == "history":
+                record["bars"] = []
+            elif kind == "quote":
+                record["data"] = {}
+            elif kind == "depth":
+                record["bids"] = {}
+                record["asks"] = {}
+            self._pending[req_id] = record
+            return record
+
+        def _pop_pending(self, req_id: int) -> dict | None:
+            return self._pending.pop(req_id, None)
+
+        # --- Event callbacks from client ---------------------------------------
+        def _on_next_valid_id(self, order_id: int):
+            self._connected_event.set()
+            with self._req_lock:
+                self._req_id = max(self._req_id, order_id)
+
+        def _on_historical_data(self, req_id, bar):
+            record = self._pending.get(req_id)
+            if not record or record.get("kind") != "history":
+                return
+            try:
+                bar_dt = pd.to_datetime(bar.date)
+            except Exception:
+                try:
+                    if isinstance(bar.date, str) and len(bar.date) == 8:
+                        bar_dt = pd.to_datetime(bar.date, format="%Y%m%d")
+                    else:
+                        bar_dt = pd.to_datetime(bar.date, unit="s")
+                except Exception:
+                    bar_dt = pd.Timestamp.now(tz="UTC")
+            record["bars"].append({
+                "Date": bar_dt,
+                "Open": float(bar.open),
+                "High": float(bar.high),
+                "Low": float(bar.low),
+                "Close": float(bar.close),
+                "Volume": float(bar.volume),
+            })
+
+        def _on_historical_end(self, req_id):
+            record = self._pending.get(req_id)
+            if record:
+                record["event"].set()
+
+        def _on_tick_price(self, req_id, tick_type, price):
+            record = self._pending.get(req_id)
+            if not record or record.get("kind") != "quote":
+                return
+            if price is None or price <= 0:
+                return
+            data = record.setdefault("data", {})
+            if tick_type in (TickTypeEnum.LAST, TickTypeEnum.CLOSE, TickTypeEnum.BID, TickTypeEnum.ASK):
+                data.setdefault("regularMarketPrice", price)
+            if tick_type == TickTypeEnum.BID:
+                data["bid"] = price
+            if tick_type == TickTypeEnum.ASK:
+                data["ask"] = price
+            if tick_type == TickTypeEnum.LAST:
+                data["last"] = price
+            record["event"].set()
+
+        def _on_tick_size(self, req_id, tick_type, size):
+            record = self._pending.get(req_id)
+            if not record or record.get("kind") != "quote":
+                return
+            data = record.setdefault("data", {})
+            if tick_type == TickTypeEnum.LAST_SIZE:
+                data["lastSize"] = size
+            if tick_type == TickTypeEnum.BID_SIZE:
+                data["bidSize"] = size
+            if tick_type == TickTypeEnum.ASK_SIZE:
+                data["askSize"] = size
+
+        def _on_tick_snapshot_end(self, req_id):
+            record = self._pending.get(req_id)
+            if record:
+                record["event"].set()
+
+        def _on_error(self, req_id, error_code, error_string):
+            if req_id == -1:
+                logging.debug("IBKR API general error %s: %s", error_code, error_string)
+                return
+            record = self._pending.get(req_id)
+            if record:
+                record["error"] = f"{error_code}: {error_string}"
+                record["event"].set()
+
+        def _on_depth_update(self, req_id, position, operation, side, price, size, market_maker=None):
+            record = self._pending.get(req_id)
+            if not record or record.get("kind") != "depth":
+                return
+            if price <= 0:
+                return
+            book = record["bids"] if side == 1 else record["asks"]
+            key = position
+            if operation == 1:  # remove
+                book.pop(key, None)
+            else:
+                book[key] = {"price": price, "size": size, "mm": market_maker}
+            record["event"].set()
+
+        # --- Public API --------------------------------------------------------
+        def get_history(self, symbol: str, *args, **kwargs):
+            client = self._ensure_client()
+            req_id = self._next_req_id()
+            record = self._register_pending(req_id, "history")
+
+            period = kwargs.pop("period", "1d")
+            interval = kwargs.pop("interval", "1d")
+            include_prepost = bool(kwargs.pop("prepost", False))
+            duration = self._map_duration(period)
+            bar_size = self._map_bar_size(interval)
+            if duration is None or bar_size is None:
+                raise ValueError(f"Unsupported period/interval combination ({period}, {interval}) for IBKR provider")
+
+            end_time = datetime.datetime.utcnow().strftime("%Y%m%d %H:%M:%S")
+            contract = self._build_contract(symbol)
+            try:
+                client.reqHistoricalData(
+                    req_id,
+                    contract,
+                    end_time,
+                    duration,
+                    bar_size,
+                    "TRADES",
+                    0 if include_prepost else 1,
+                    1,
+                    False,
+                    [],
+                )
+            except Exception as exc:
+                self._pop_pending(req_id)
+                raise RuntimeError(f"IBKR historical data request failed: {exc}")
+
+            timeout = float(self._config.get("timeout", 10.0))
+            if not record["event"].wait(timeout=timeout):
+                self._pop_pending(req_id)
+                raise TimeoutError("IBKR historical data request timed out")
+
+            error = record.get("error")
+            bars = record.get("bars", [])
+            self._pop_pending(req_id)
+            if error:
+                raise RuntimeError(f"IBKR historical data error: {error}")
+            if not bars:
+                return pd.DataFrame()
+            df = pd.DataFrame(bars)
+            df = df.set_index(pd.to_datetime(df.pop("Date")))
+            df.index.name = "Date"
+            return df
+
+        def get_quote(self, symbol: str, *args, **kwargs) -> dict:
+            client = self._ensure_client()
+            req_id = self._next_req_id()
+            record = self._register_pending(req_id, "quote")
+            contract = self._build_contract(symbol, kwargs.get("contract_overrides"))
+            try:
+                client.reqMktData(req_id, contract, "", True, False, [])
+            except Exception as exc:
+                self._pop_pending(req_id)
+                raise RuntimeError(f"IBKR market data request failed: {exc}")
+
+            timeout = float(self._config.get("timeout", 6.0))
+            record["event"].wait(timeout=timeout)
+            try:
+                client.cancelMktData(req_id)
+            except Exception:
+                pass
+
+            data = record.get("data", {})
+            error = record.get("error")
+            self._pop_pending(req_id)
+            if error:
+                raise RuntimeError(f"IBKR quote error: {error}")
+            if not data:
+                return {}
+            quote = {
+                "regularMarketPrice": data.get("regularMarketPrice"),
+                "bid": data.get("bid"),
+                "ask": data.get("ask"),
+                "marketState": "REGULAR",
+            }
+            if data.get("last") is not None:
+                quote["last"] = data.get("last")
+            if data.get("lastSize") is not None:
+                quote["lastSize"] = data.get("lastSize")
+            return quote
+
+        def get_fast_info(self, symbol: str) -> dict:
+            try:
+                quote = self.get_quote(symbol)
+            except Exception:
+                quote = {}
+            info = {}
+            if quote.get("regularMarketPrice") is not None:
+                info["lastPrice"] = quote["regularMarketPrice"]
+            if quote.get("bid") is not None:
+                info["bid"] = quote["bid"]
+            if quote.get("ask") is not None:
+                info["ask"] = quote["ask"]
+            return info
+
+        def get_raw_ticker(self, symbol: str):
+            # For IBKR we don't expose a raw ticker object; return None so callers use provider APIs.
+            return None
+
+        def preferred_refresh_interval_ms(self) -> int:
+            return 1000
+
+        def supports_order_book(self) -> bool:
+            return True
+
+        def get_order_book(self, symbol: str, depth: int = 10) -> list[dict[str, Any]]:
+            client = self._ensure_client()
+            req_id = self._next_req_id()
+            record = self._register_pending(req_id, "depth")
+            contract = self._build_contract(symbol)
+            try:
+                client.reqMktDepth(req_id, contract, depth, False, [])
+            except Exception as exc:
+                self._pop_pending(req_id)
+                raise RuntimeError(f"IBKR depth request failed: {exc}")
+
+            timeout = float(self._config.get("dom_timeout", 2.0))
+            record["event"].wait(timeout=timeout)
+            try:
+                client.cancelMktDepth(req_id, False)
+            except Exception:
+                pass
+
+            bids_map = record.get("bids", {})
+            asks_map = record.get("asks", {})
+            error = record.get("error")
+            self._pop_pending(req_id)
+            if error:
+                raise RuntimeError(f"IBKR depth error: {error}")
+            bids = [bids_map[k] for k in sorted(bids_map.keys(), reverse=True)]
+            asks = [asks_map[k] for k in sorted(asks_map.keys())]
+            book = []
+            max_levels = max(len(bids), len(asks))
+            for i in range(max_levels):
+                entry = {}
+                if i < len(bids):
+                    entry["bidPrice"] = bids[i]["price"]
+                    entry["bidSize"] = bids[i]["size"]
+                if i < len(asks):
+                    entry["askPrice"] = asks[i]["price"]
+                    entry["askSize"] = asks[i]["size"]
+                if entry:
+                    book.append(entry)
+            return book
+
+        def provider_name(self) -> str:
+            return "Interactive Brokers"
+
+        # --- Utility mappers ---------------------------------------------------
+        @staticmethod
+        def _map_bar_size(interval: str) -> str | None:
+            mapping = {
+                "1m": "1 min",
+                "5m": "5 mins",
+                "10m": "10 mins",
+                "15m": "15 mins",
+                "30m": "30 mins",
+                "1h": "1 hour",
+                "2h": "2 hours",
+                "3h": "3 hours",
+                "4h": "4 hours",
+                "6h": "6 hours",
+                "1d": "1 day",
+            }
+            return mapping.get(interval)
+
+        @staticmethod
+        def _map_duration(period: str) -> str | None:
+            mapping = {
+                "1d": "1 D",
+                "2d": "2 D",
+                "5d": "5 D",
+                "7d": "7 D",
+                "30d": "30 D",
+                "60d": "60 D",
+                "90d": "90 D",
+                "1y": "1 Y",
+                "2y": "2 Y",
+            }
+            if period in mapping:
+                return mapping[period]
+            if period.endswith("d"):
+                try:
+                    days = int(period[:-1])
+                    return f"{days} D"
+                except Exception:
+                    return None
+            if period.endswith("y"):
+                try:
+                    years = int(period[:-1])
+                    return f"{years} Y"
+                except Exception:
+                    return None
+            return None
+
+else:
+
+    class IBKRMarketDataProvider(MarketDataProvider):
+        """Fallback placeholder when ibapi is missing."""
+
+        def __init__(self):
+            super().__init__()
+            raise RuntimeError("ibapi package not installed. Install ibapi to enable IBKR provider.")
+
+def _load_provider_config() -> dict:
+    raw = os.getenv("MARKET_DATA_PROVIDER_CONFIG")
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception as exc:
+        logging.warning("Invalid MARKET_DATA_PROVIDER_CONFIG JSON: %s", exc)
+        return {}
+
+
+def load_market_data_provider() -> MarketDataProvider:
+    provider_path = os.getenv("MARKET_DATA_PROVIDER")
+    config = _load_provider_config()
+    if provider_path:
+        lower = provider_path.strip().lower()
+        if lower in {"ib", "ibkr", "interactive_brokers"}:
+            if not IBAPI_AVAILABLE:
+                logging.warning("MARKET_DATA_PROVIDER=IBKR but ibapi is not installed; falling back to yfinance")
+            else:
+                provider = IBKRMarketDataProvider()
+                try:
+                    provider.configure(config)
+                except Exception as exc:
+                    logging.warning("IBKR provider configure() failed: %s", exc)
+                logging.info("Loaded IBKR market data provider")
+                return provider
+        module_name, _, class_name = provider_path.partition(":")
+        if not class_name:
+            class_name = "MarketDataProvider"
+        try:
+            module = importlib.import_module(module_name)
+            provider_cls = getattr(module, class_name)
+            provider: MarketDataProvider = provider_cls()  # type: ignore[assignment]
+            if hasattr(provider, "configure"):
+                try:
+                    provider.configure(config)
+                except Exception as exc:
+                    logging.warning("Provider configure() failed: %s", exc)
+            logging.info("Loaded custom market data provider %s", provider_path)
+            return provider
+        except Exception as exc:
+            logging.warning("Falling back to yfinance provider. Could not load %s: %s", provider_path, exc)
+    if IBAPI_AVAILABLE:
+        try:
+            provider = IBKRMarketDataProvider()
+            provider.configure(config)
+            logging.info("Using IBKR market data provider (auto-detected ibapi)")
+            return provider
+        except Exception as exc:
+            logging.warning("Auto IBKR provider init failed (%s); reverting to yfinance", exc)
+    provider = YFinanceProvider()
+    if hasattr(provider, "configure"):
+        try:
+            provider.configure(config)
+        except Exception as exc:
+            logging.warning("Default provider configure() failed: %s", exc)
+    return provider
+
+
+MARKET_DATA_PROVIDER: MarketDataProvider = load_market_data_provider()
+
+
+def get_market_handle(symbol: str) -> MarketDataHandle:
+    return MARKET_DATA_PROVIDER.get_handle(symbol)
+
 
 # Basic logging configuration
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -85,6 +791,16 @@ DEEP_SEA_THEME = {
     'hover': '#5D6D7E',             # Hover state
     'active': '#76D7C4',            # Active state - turquoise
     'shadow': '#0F1A2B'             # Shadow color
+}
+
+MARKET_STATE_LABELS = {
+    "PRE": "Pre-Market",
+    "PREPRE": "Early Pre-Market",
+    "REGULAR": "Regular Hours",
+    "POST": "After Hours",
+    "POSTPOST": "Late After Hours",
+    "CLOSED": "Closed",
+    "CLOSE": "Closed",
 }
 
 # Global reference to the active main notebook (chart/news/heatmap tabs)
@@ -130,7 +846,11 @@ def estimate_tick_size(symbol: str, price_samples: Iterable[float]) -> float:
             return max(min(diffs), 0.0001)
 
     try:
-        latest_price = float(prices[-1]) if prices else float(yf.Ticker(symbol).fast_info.get("lastPrice") or 0)
+        if prices:
+            latest_price = float(prices[-1])
+        else:
+            latest = MARKET_DATA_PROVIDER.get_last_price(symbol)
+            latest_price = float(latest) if latest is not None else 0.0
     except Exception:
         latest_price = 0.0
 
@@ -166,7 +886,13 @@ def fetch_symbol_ticks(symbol: str, interval: str = "1m", limit: int | None = No
         limit = 90 if interval in ("15s", "30s", "1m") else 150
 
     try:
-        hist = yf.Ticker(symbol).history(period=period, interval=yf_interval, auto_adjust=False, prepost=True)
+        hist = MARKET_DATA_PROVIDER.get_history(
+            symbol,
+            period=period,
+            interval=yf_interval,
+            auto_adjust=False,
+            prepost=True,
+        )
     except Exception as exc:
         logging.warning("Footprint history fetch failed for %s: %s", symbol, exc)
         return pd.DataFrame(columns=["ts", "price", "size", "side"]), 0.01
@@ -228,7 +954,7 @@ else:
 
 # Default ticker symbol from environment or fallback to MSFT
 symbol = os.getenv("DEFAULT_SYMBOL", "MSFT")
-ticker = yf.Ticker(symbol)
+ticker = MARKET_DATA_PROVIDER.get_handle(symbol)
 
 # Initialize global variables for later use
 prev_close = None
@@ -301,6 +1027,61 @@ def http_get_text(url, params=None, timeout=10, retries=2, backoff=1.5, headers=
             else:
                 break
     raise last_err if last_err else RuntimeError("Unknown request error")
+
+
+def fetch_realtime_quote(symbol: str) -> tuple[float | None, str | None, dict | None]:
+    """Fetch live quote prioritising extended-hours data. Falls back to cached + delayed."""
+
+    cache_key = symbol.upper()
+    now = time.time()
+    cached = REALTIME_QUOTE_CACHE.get(cache_key)
+    if cached and now - cached[1] < REALTIME_QUOTE_TTL:
+        price = cached[0]
+        quote = cached[2]
+        market_state = quote.get("marketState") if isinstance(quote, dict) else None
+        return price, market_state, quote
+
+    quote = MARKET_DATA_PROVIDER.get_quote(symbol) or {}
+    market_state = None
+    if isinstance(quote, dict):
+        market_state = (quote.get("marketState") or "").upper() or None
+
+    def pick_float(data: dict, *keys: str) -> float | None:
+        for key in keys:
+            val = data.get(key)
+            if val is None:
+                continue
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    price = MARKET_DATA_PROVIDER.get_last_price(symbol)
+    if price is None and isinstance(quote, dict):
+        if market_state in {"PRE", "PREPRE"}:
+            price = pick_float(quote, "preMarketPrice", "regularMarketPrice", "postMarketPrice")
+        elif market_state in {"POST", "POSTPOST"}:
+            price = pick_float(quote, "postMarketPrice", "regularMarketPrice", "preMarketPrice")
+        else:
+            price = pick_float(quote, "regularMarketPrice", "preMarketPrice", "postMarketPrice")
+
+        if quote.get("preMarketChangePercent") is None and quote.get("preMarketChange") is not None and quote.get("preMarketPrice"):
+            try:
+                change = float(quote.get("preMarketChange") or 0)
+                base = float(quote.get("regularMarketPreviousClose") or quote.get("preMarketPrice") or 0)
+                quote["preMarketChangePercent"] = (change / base) * 100 if base else None
+            except Exception:
+                pass
+
+    if price is None and cached:
+        REALTIME_QUOTE_CACHE[cache_key] = (cached[0], now, cached[2])
+        quote = cached[2]
+        market_state = quote.get("marketState") if isinstance(quote, dict) else None
+        return cached[0], market_state, quote
+
+    REALTIME_QUOTE_CACHE[cache_key] = (price, now, quote if isinstance(quote, dict) else None)
+    return price, market_state, quote if isinstance(quote, dict) else None
 
 # --- Technical Analysis Signal Section ---
 TAAPI_KEY = os.getenv("TAAPI_KEY", "YOUR_TAAPI_KEY")  # Load from environment variable
@@ -382,7 +1163,7 @@ def initialize_technical_analysis():
 def get_percent_gain(symbol):
     """Get 2-day percent gain for a symbol"""
     try:
-        ticker_obj = yf.Ticker(symbol)
+        ticker_obj = MARKET_DATA_PROVIDER.get_handle(symbol)
         hist = ticker_obj.history(period="2d")
         if len(hist) >= 2:
             prev_close = hist['Close'].iloc[0]
@@ -401,8 +1182,8 @@ def get_in_depth_analysis(symbol):
         return f"OpenAI API key not configured. Please set OPENAI_API_KEY in your .env file to enable AI analysis.\n\nYou can get an API key from: https://platform.openai.com/account/api-keys\n\nFor now, showing basic stock information for {symbol}..."
     
     # Fetch company info and financials using yfinance
-    ticker_obj = yf.Ticker(symbol)  # Create new ticker object for this symbol
-    info = ticker_obj.info
+    ticker_obj = MARKET_DATA_PROVIDER.get_handle(symbol)
+    info = ticker_obj.info if hasattr(ticker_obj, 'info') else ticker_obj.get_info()
     financials = ticker_obj.financials.replace({np.nan: np.nan}) if hasattr(ticker_obj, 'financials') else pd.DataFrame()
     balance_sheet = ticker_obj.balance_sheet.replace({np.nan: np.nan}) if hasattr(ticker_obj, 'balance_sheet') else pd.DataFrame()
     cashflow = ticker_obj.cashflow.replace({np.nan: np.nan}) if hasattr(ticker_obj, 'cashflow') else pd.DataFrame()
@@ -568,7 +1349,8 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
     def fetch_chart_data():
         tf = current_timeframe.get()
         tf_config = timeframe_mapping[tf]
-        
+        realtime_meta = {"price": None, "state": None, "quote": None}
+
         try:
             data_note = ""
             # Optimized data fetching - simplified and faster
@@ -708,6 +1490,30 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                 print(f"Limited data from {original_length} to {len(chart_hist)} points for performance")
             else:
                 print(f"No data limiting needed: {len(chart_hist)} <= {max_points.get(tf, 'unlimited')}")
+
+            try:
+                rt_price, rt_state, rt_quote = fetch_realtime_quote(symbol)
+                realtime_meta = {"price": rt_price, "state": rt_state, "quote": rt_quote}
+                if rt_price is not None and len(chart_hist) > 0:
+                    last_idx = chart_hist.index[-1]
+                    try:
+                        current_high = chart_hist.at[last_idx, 'High']
+                        current_low = chart_hist.at[last_idx, 'Low']
+                        chart_hist.at[last_idx, 'Close'] = rt_price
+                        if pd.notna(current_high):
+                            chart_hist.at[last_idx, 'High'] = max(float(current_high), rt_price)
+                        else:
+                            chart_hist.at[last_idx, 'High'] = rt_price
+                        if pd.notna(current_low):
+                            chart_hist.at[last_idx, 'Low'] = min(float(current_low), rt_price)
+                        else:
+                            chart_hist.at[last_idx, 'Low'] = rt_price
+                        if pd.isna(chart_hist.at[last_idx, 'Open']):
+                            chart_hist.at[last_idx, 'Open'] = rt_price
+                    except Exception as adjust_error:
+                        logging.debug("Realtime adjustment failed for %s: %s", symbol, adjust_error)
+            except Exception as realtime_error:
+                logging.debug("Realtime price fetch skipped for %s: %s", symbol, realtime_error)
             
             # Simplified technical indicators - only if needed
             try:
@@ -741,7 +1547,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             high_vol_price = (price_bins[high_vol_idx] + price_bins[high_vol_idx+1]) / 2 if len(price_bins) > 1 else 0
             low_vol_price = (price_bins[low_vol_idx] + price_bins[low_vol_idx+1]) / 2 if len(price_bins) > 1 else 0
             
-            return chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price, data_note
+            return chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price, data_note, realtime_meta
         except Exception as e:
             print(f"Error fetching data for {tf}: {e}")
             # Fallback to daily data with error handling
@@ -784,7 +1590,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                     high_vol_price = 0
                     low_vol_price = 0
                 
-                return chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price, "daily fallback"
+                return chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price, "daily fallback", realtime_meta
             except Exception as fallback_error:
                 print(f"Fallback failed: {fallback_error}")
                 # Return empty data structure to prevent crash
@@ -792,7 +1598,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                     'Date': [mdates.date2num(datetime.now())],
                     'Open': [100], 'High': [100], 'Low': [100], 'Close': [100], 'Volume': [0]
                 })
-                return empty_df, np.array([99, 101]), np.array([0]), 100, 100, "synthetic"
+                return empty_df, np.array([99, 101]), np.array([0]), 100, 100, "synthetic", realtime_meta
 
     def draw_chart(chart_type="Candlestick"):
         nonlocal refresh_timer, last_tick_timer
@@ -1204,7 +2010,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             new_symbol = simpledialog.askstring("Add Tab", "Enter the stock ticker symbol (e.g., MSFT):", parent=frame)
             if not new_symbol:
                 return
-            new_ticker = yf.Ticker(new_symbol)
+            new_ticker = get_market_handle(new_symbol)
             new_hist = new_ticker.history(period="2d")
             if len(new_hist) < 2:
                 messagebox.showerror("Error", f"Not enough data for {new_symbol}.")
@@ -1286,13 +2092,26 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             fg=DEEP_SEA_THEME['text_secondary']
         )
         status_label.pack(side=tk.LEFT)
+
+        premarket_label = tk.Label(
+            info_frame,
+            text="",
+            font=("Segoe UI", 9, "bold"),
+            bg=DEEP_SEA_THEME['secondary_bg'],
+            fg=DEEP_SEA_THEME['text_secondary']
+        )
+        premarket_label.pack(side=tk.LEFT, padx=(12, 0))
         
         def toggle_auto_refresh():
             auto_refresh_enabled.set(not auto_refresh_enabled.get())
             draw_chart("Candlestick")  # Redraw to update button state
-        
+
+        last_market_state = None
+        last_realtime_price = None
+        last_realtime_quote = None
+
         try:
-            chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price, data_note = fetch_chart_data()
+            chart_hist, price_bins, volume_profile, high_vol_price, low_vol_price, data_note, realtime_meta = fetch_chart_data()
             tf = current_timeframe.get()
             has_prepost = tf in ["1m", "5m", "10m", "15m", "20m", "30m", "1h"]
             status_text = f"OK {tf.upper()} - {len(chart_hist)} bars"
@@ -1300,6 +2119,65 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                 status_text += f" ({data_note})"
             if has_prepost:
                 status_text += " (Extended Hours)"
+            try:
+                source_name = MARKET_DATA_PROVIDER.provider_name()
+            except Exception:
+                source_name = MARKET_DATA_PROVIDER.__class__.__name__
+            if percent_gain is not None:
+                status_text += f" | Δ {percent_gain:+.2f}%"
+            if source_name:
+                status_text += f" | Powered by {source_name}"
+
+            base_status_text = status_text
+            last_realtime_quote = realtime_meta.get("quote")
+
+            def update_premarket_label(quote, state):
+                state_code = (state or "").upper()
+                if not isinstance(quote, dict) or state_code not in {"PRE", "PREPRE"}:
+                    premarket_label.config(text="", fg=DEEP_SEA_THEME['text_secondary'])
+                    return
+                price = quote.get("preMarketPrice")
+                change = quote.get("preMarketChange")
+                percent = quote.get("preMarketChangePercent")
+                try:
+                    percent_val = float(percent)
+                except (TypeError, ValueError):
+                    premarket_label.config(text="", fg=DEEP_SEA_THEME['text_secondary'])
+                    return
+                change_val = None
+                try:
+                    if change is not None:
+                        change_val = float(change)
+                except (TypeError, ValueError):
+                    change_val = None
+
+                text_parts = [f"Pre {percent_val:+.2f}%"]
+                if change_val is not None:
+                    sign = "+" if change_val >= 0 else "-"
+                    text_parts.append(f"({sign}${abs(change_val):.2f})")
+                pre_color = DEEP_SEA_THEME['success'] if percent_val >= 0 else DEEP_SEA_THEME['danger']
+                premarket_label.config(text=" ".join(text_parts), fg=pre_color)
+
+            def update_status_line(price=None, state=None, quote=None, is_live=True):
+                text = base_status_text
+                extra_bits = []
+                if state:
+                    label = MARKET_STATE_LABELS.get(state.upper(), state.title()) if isinstance(state, str) else str(state)
+                    extra_bits.append(label)
+                if price is not None:
+                    extra_bits.append(f"{price:.2f}")
+                if price is not None or state:
+                    extra_bits.append("live" if is_live else "delayed")
+                if extra_bits:
+                    text = f"{base_status_text} | {' '.join(extra_bits)}"
+                status_label.config(text=text)
+                active_quote = quote if quote is not None else last_realtime_quote
+                target_state = state if state is not None else last_market_state
+                update_premarket_label(active_quote, target_state)
+
+            last_market_state = realtime_meta.get("state")
+            last_realtime_price = realtime_meta.get("price")
+            update_status_line(last_realtime_price, last_market_state, quote=last_realtime_quote, is_live=last_realtime_price is not None)
         except Exception as e:
             error_label = tk.Label(frame, text=f"Error loading chart: {e}", bg=DEEP_SEA_THEME['primary_bg'], fg=DEEP_SEA_THEME['danger'], font=("Segoe UI", 12))
             error_label.pack(expand=1)
@@ -1930,25 +2808,40 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
         
         fig.canvas.mpl_connect('scroll_event', on_scroll)
 
-        # --- 5s lightweight updater: move only the newest candle to latest price ---
+        tick_refresh_ms = max(500, MARKET_DATA_PROVIDER.preferred_refresh_interval_ms())
+
+        # --- Lightweight updater: move only the newest candle to latest price ---
         def fetch_last_trade_price():
+            nonlocal last_market_state, last_realtime_price, last_realtime_quote
+            price, state, quote = fetch_realtime_quote(symbol)
+            if price is not None:
+                last_realtime_price = price
+                if state:
+                    last_market_state = state
+                if quote is not None:
+                    last_realtime_quote = quote
+                update_status_line(last_realtime_price, last_market_state, quote=last_realtime_quote, is_live=True)
+                return price
             try:
-                # Use 1m interval for freshest trade price
+                # Fallback to 1m interval (delayed) when realtime quote unavailable
                 recent = ticker.history(period="1d", interval="1m", prepost=True, repair=True)
                 if recent is not None and not recent.empty:
-                    return float(recent['Close'].iloc[-1])
-            except Exception as _e:
+                    fallback_price = float(recent['Close'].iloc[-1])
+                    last_realtime_price = fallback_price
+                    update_status_line(fallback_price, last_market_state, quote=last_realtime_quote, is_live=False)
+                    return fallback_price
+            except Exception:
                 pass
             return None
 
         def update_last_candle():
-            nonlocal last_tick_timer, last_low_val, last_high_val
+            nonlocal last_tick_timer, last_low_val, last_high_val, last_market_state, last_realtime_price, last_realtime_quote
             if not frame.winfo_exists() or last_body_patch is None or last_wick_line is None or last_open_val is None:
                 return
             new_px = fetch_last_trade_price()
             if new_px is None:
                 # Try again later
-                last_tick_timer = frame.after(5000, update_last_candle)
+                last_tick_timer = frame.after(tick_refresh_ms, update_last_candle)
                 return
             # Update body geometry
             top = max(new_px, last_open_val)
@@ -1976,10 +2869,10 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             # Redraw only this figure
             canvas.draw_idle()
             # Reschedule
-            last_tick_timer = frame.after(5000, update_last_candle)
+            last_tick_timer = frame.after(tick_refresh_ms, update_last_candle)
 
         # Start the 5-second updater only for candlestick chart
-        last_tick_timer = frame.after(5000, update_last_candle)
+        last_tick_timer = frame.after(tick_refresh_ms, update_last_candle)
         
         # Optimized auto-refresh with longer intervals
         if auto_refresh_enabled.get():
@@ -1993,11 +2886,13 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                 interval = 120000  # 2 minutes for 15m/30m
             else:
                 interval = 300000  # 5 minutes for longer timeframes
-            
+
             refresh_timer = frame.after(interval, draw_chart)
-            status_label.config(text=f"{status_text} (Refresh: {interval//1000}s)")
+            base_status_text = status_text
+            update_status_line(last_realtime_price, last_market_state, quote=last_realtime_quote, is_live=last_realtime_price is not None)
         else:
-            status_label.config(text=status_text)
+            base_status_text = status_text
+            update_status_line(last_realtime_price, last_market_state, quote=last_realtime_quote, is_live=last_realtime_price is not None)
 
     # Show chart by default
     draw_chart("Candlestick")
@@ -2715,7 +3610,7 @@ def main_tabbed_chart():
                 open_stock_layout_with_symbol(symbol)
             except Exception:
                 # Fallback: open_stock_layout may not be available from Home; ensure trading interface
-                ticker = yf.Ticker(symbol)
+                ticker = get_market_handle(symbol)
                 hist = ticker.history(period="2d")
                 if len(hist) >= 2:
                     prev_close = hist['Close'].iloc[0]
@@ -2847,7 +3742,7 @@ def main_tabbed_chart():
             try:
                 open_stock_layout_with_symbol(symbol)
             except Exception:
-                ticker = yf.Ticker(symbol)
+                ticker = get_market_handle(symbol)
                 hist = ticker.history(period="2d")
                 if len(hist) >= 2:
                     prev_close = hist['Close'].iloc[0]
@@ -3034,7 +3929,7 @@ def main_tabbed_chart():
                     vol = None
                     rsi_val = None
                     try:
-                        t = yf.Ticker(tkr)
+                        t = get_market_handle(tkr)
                         hist = t.history(period="60d", interval="1d", prepost=False, repair=True)
                         if hist is not None and len(hist) >= 2:
                             price = float(hist['Close'].iloc[-1])
@@ -3084,7 +3979,7 @@ def main_tabbed_chart():
             try:
                 open_stock_layout_with_symbol(symbol)
             except Exception:
-                ticker = yf.Ticker(symbol)
+                ticker = get_market_handle(symbol)
                 hist = ticker.history(period="2d")
                 if len(hist) >= 2:
                     prev_close = hist['Close'].iloc[0]
@@ -3122,7 +4017,7 @@ def main_tabbed_chart():
             if not target:
                 return
             try:
-                ticker_obj = yf.Ticker(target)
+                ticker_obj = get_market_handle(target)
                 hist = ticker_obj.history(period="2d")
                 if len(hist) >= 2:
                     prev_close = hist['Close'].iloc[0]
@@ -3484,7 +4379,7 @@ def main_tabbed_chart():
         # Clear only main content and create trading interface
         clear_main_content()
         # Get stock data
-        ticker = yf.Ticker(symbol)
+        ticker = get_market_handle(symbol)
         hist = ticker.history(period="2d")
         
         if len(hist) < 2:
@@ -3814,13 +4709,15 @@ def main_tabbed_chart():
             return book
 
         def fetch_last_price():
+            price = MARKET_DATA_PROVIDER.get_last_price(symbol)
+            if price is not None:
+                return float(price)
             try:
                 hist = ticker.history(period="1d", interval="1m")
                 if not hist.empty:
                     return float(hist['Close'].iloc[-1])
             except Exception:
                 pass
-            # Fallback to previous latest_close if available else random baseline
             return latest_close if latest_close else 100.0
 
         def update_dom():
@@ -3828,17 +4725,48 @@ def main_tabbed_chart():
                 return
             # Only refresh when DOM panel is visible to reduce load
             if dom_frame.winfo_ismapped():
-                base = fetch_last_price()
-                book = build_simulated_book(base)
-                for i, (bid_sz, bid_p, ask_p, ask_sz) in enumerate(book):
-                    if i >= len(cell_labels):
-                        break
-                    cells = cell_labels[i]
-                    # Update text
-                    cells[0].config(text=str(bid_sz), fg=DEEP_SEA_THEME['success'])
-                    cells[1].config(text=f"{bid_p:.2f}", fg=DEEP_SEA_THEME['success'])
-                    cells[2].config(text=f"{ask_p:.2f}", fg=DEEP_SEA_THEME['danger'])
-                    cells[3].config(text=str(ask_sz), fg=DEEP_SEA_THEME['danger'])
+                try:
+                    if MARKET_DATA_PROVIDER.supports_order_book():
+                        dom_entries = MARKET_DATA_PROVIDER.get_order_book(symbol, depth=order_rows)
+                        if not dom_entries:
+                            raise RuntimeError("Empty order book")
+                        for i in range(order_rows):
+                            cells = cell_labels[i]
+                            if i < len(dom_entries):
+                                entry = dom_entries[i]
+                                bid_sz = entry.get("bidSize")
+                                bid_px = entry.get("bidPrice")
+                                ask_px = entry.get("askPrice")
+                                ask_sz = entry.get("askSize")
+                            else:
+                                bid_sz = bid_px = ask_px = ask_sz = None
+                            cells[0].config(text=str(int(bid_sz)) if bid_sz else "", fg=DEEP_SEA_THEME['success'])
+                            cells[1].config(text=f"{bid_px:.2f}" if bid_px else "", fg=DEEP_SEA_THEME['success'])
+                            cells[2].config(text=f"{ask_px:.2f}" if ask_px else "", fg=DEEP_SEA_THEME['danger'])
+                            cells[3].config(text=str(int(ask_sz)) if ask_sz else "", fg=DEEP_SEA_THEME['danger'])
+                    else:
+                        base = fetch_last_price()
+                        book = build_simulated_book(base)
+                        for i, (bid_sz, bid_p, ask_p, ask_sz) in enumerate(book):
+                            if i >= len(cell_labels):
+                                break
+                            cells = cell_labels[i]
+                            cells[0].config(text=str(bid_sz), fg=DEEP_SEA_THEME['success'])
+                            cells[1].config(text=f"{bid_p:.2f}", fg=DEEP_SEA_THEME['success'])
+                            cells[2].config(text=f"{ask_p:.2f}", fg=DEEP_SEA_THEME['danger'])
+                            cells[3].config(text=str(ask_sz), fg=DEEP_SEA_THEME['danger'])
+                except Exception as dom_error:
+                    logging.debug("DOM update failed: %s", dom_error)
+                    base = fetch_last_price()
+                    book = build_simulated_book(base)
+                    for i, (bid_sz, bid_p, ask_p, ask_sz) in enumerate(book):
+                        if i >= len(cell_labels):
+                            break
+                        cells = cell_labels[i]
+                        cells[0].config(text=str(bid_sz), fg=DEEP_SEA_THEME['success'])
+                        cells[1].config(text=f"{bid_p:.2f}", fg=DEEP_SEA_THEME['success'])
+                        cells[2].config(text=f"{ask_p:.2f}", fg=DEEP_SEA_THEME['danger'])
+                        cells[3].config(text=str(ask_sz), fg=DEEP_SEA_THEME['danger'])
             # Schedule next update
             dom_frame.after(1000, update_dom)
 
@@ -3965,7 +4893,7 @@ def main_tabbed_chart():
             new_symbol = simpledialog.askstring("Add Tab", "Enter the stock ticker symbol (e.g., MSFT):", parent=root)
             if not new_symbol:
                 return
-            new_ticker = yf.Ticker(new_symbol)
+            new_ticker = get_market_handle(new_symbol)
             new_hist = new_ticker.history(period="2d")
             if len(new_hist) < 2:
                 messagebox.showerror("Error", f"Not enough data for {new_symbol}.")
