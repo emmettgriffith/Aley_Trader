@@ -1,0 +1,86 @@
+{
+  "generated_at": "2024-06-01T00:00:00Z",
+  "description": "TradingView-inspired deep ocean palette with brand accents",
+  "palette": {
+    "primary_bg": "#050E1B",
+    "secondary_bg": "#0F1F33",
+    "accent_bg": "#18426F",
+    "surface_bg": "#2F4C6D",
+    "card_bg": "#112B47",
+    "panel_overlay": "#101C2B",
+    "gridline": "#1C2940",
+    "divider": "#1D2B41",
+    "text_primary": "#F5FAFF",
+    "text_secondary": "#C7D3E3",
+    "text_muted": "#7287A4",
+    "text_accent": "#76C7FF",
+    "success": "#2ECC71",
+    "danger": "#FF6B6B",
+    "warning": "#F7B731",
+    "info": "#5DADE2",
+    "highlight": "#4CD7D0",
+    "shadow": "#030911"
+  },
+  "gradients": {
+    "primary": [
+      "#050E1B",
+      "#0F1F33",
+      "#18426F"
+    ],
+    "button": [
+      "#395FA3",
+      "#1B3C73"
+    ],
+    "chart_background": [
+      "#091C33",
+      "#0F1F33"
+    ]
+  },
+  "fonts": {
+    "base_family": "\"Inter\", \"Segoe UI\", \"Helvetica Neue\", sans-serif",
+    "mono_family": "\"JetBrains Mono\", \"Fira Code\", monospace",
+    "title_weight": 600,
+    "body_weight": 400,
+    "small_caps": 500
+  },
+  "borders": {
+    "radius_sm": 6,
+    "radius_lg": 18,
+    "width": 1,
+    "glow_width": 2
+  },
+  "lighting": {
+    "card_shadow": {
+      "offset": [
+        0,
+        18
+      ],
+      "blur": 45,
+      "spread": -24,
+      "color": "#031627C8"
+    },
+    "hover_shadow": {
+      "offset": [
+        0,
+        12
+      ],
+      "blur": 32,
+      "spread": -16,
+      "color": "#0E4375AA"
+    }
+  },
+  "ui_states": {
+    "hover": "#5EA8FF",
+    "active": "#299EFF",
+    "focus_ring": "#29E3FF",
+    "selection_bg": "#223A54",
+    "selection_fg": "#FFFFFF"
+  },
+  "signals": {
+    "bullish": "#24E1A6",
+    "bearish": "#FF5C8A",
+    "neutral": "#BDC3C7",
+    "volume_up": "#2ED8A0",
+    "volume_down": "#FF7A8A"
+  }
+}

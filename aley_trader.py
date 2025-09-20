@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import logging
+import copy
 import math
 import subprocess  # Added for spawning new application windows
 import importlib
@@ -35,6 +36,7 @@ except ImportError:
 from dotenv import load_dotenv
 import json
 import os
+import shutil
 import threading
 import webbrowser
 import html
@@ -43,6 +45,7 @@ from email.utils import parsedate_to_datetime
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 import sys
+from pathlib import Path
 import hashlib
 import hmac
 import base64
@@ -75,8 +78,35 @@ Contract = _Contract  # type: ignore[assignment]
 TickTypeEnum = _TickTypeEnum  # type: ignore[assignment]
 
 YAHOO_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
+YAHOO_SCREENER_URL = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
+YAHOO_MULTI_QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote"
 REALTIME_QUOTE_CACHE: dict[str, tuple[float | None, float, dict | None]] = {}
 REALTIME_QUOTE_TTL = 6.0  # seconds
+
+MARKET_MOVERS_SCREENS: list[tuple[str, str]] = [
+    ("Top Gainers", "day_gainers"),
+    ("Top Losers", "day_losers"),
+    ("Most Active", "most_actives"),
+]
+
+MAJOR_INDEX_CARDS: list[dict[str, str]] = [
+    {"name": "S&P 500", "symbol": "^GSPC", "tag": "500"},
+    {"name": "Nasdaq 100", "symbol": "^NDX", "tag": "100"},
+    {"name": "Dow 30", "symbol": "^DJI", "tag": "30"},
+    {"name": "US 2000 Small Cap", "symbol": "^RUT", "tag": "2000"},
+    {"name": "Nasdaq Composite", "symbol": "^IXIC", "tag": "COMP"},
+]
+
+WORLD_INDEX_SYMBOLS: list[tuple[str, str, str]] = [
+    ("Nikkei 225", "^N225", "Japan 225 Index"),
+    ("FTSE 100", "^FTSE", "FTSE 100"),
+    ("DAX", "^GDAXI", "Germany DAX Index"),
+    ("CAC 40", "^FCHI", "France CAC 40"),
+    ("IBEX 35", "^IBEX", "Spain IBEX"),
+    ("Bovespa", "^BVSP", "Brazil Bovespa"),
+    ("Hang Seng", "^HSI", "Hong Kong Hang Seng"),
+    ("ASX 200", "^AXJO", "Australia ASX 200"),
+]
 
 
 class MarketDataHandle:
@@ -774,7 +804,11 @@ except ImportError as e:
         ai_patterns = None
 
 # Deep Sea Blue Theme Color Palette
-DEEP_SEA_THEME = {
+BASE_DIR = Path(__file__).resolve().parent
+THEME_FILE = BASE_DIR / "ui" / "themes" / "tradingview_theme.json"
+THEME_SCRIPT = BASE_DIR / "scripts" / "build_theme.rb"
+
+DEFAULT_THEME = {
     'primary_bg': '#0A1628',        # Deep ocean blue - main background
     'secondary_bg': '#1B2838',      # Darker sea blue - secondary panels
     'accent_bg': '#2C3E50',         # Steel blue - accent elements
@@ -792,6 +826,98 @@ DEEP_SEA_THEME = {
     'active': '#76D7C4',            # Active state - turquoise
     'shadow': '#0F1A2B'             # Shadow color
 }
+
+DEFAULT_THEME_META = {
+    'fonts': {
+        'base_family': 'Segoe UI, sans-serif',
+        'mono_family': 'JetBrains Mono, Consolas, monospace',
+        'title_weight': 600,
+    },
+    'ui_states': {
+        'hover': '#5D6D7E',
+        'active': '#76D7C4',
+        'focus_ring': '#76D7C4'
+    },
+    'lighting': {
+        'card_shadow': {
+            'offset': (0, 12),
+            'blur': 24,
+            'spread': -16,
+            'color': '#08142580'
+        }
+    },
+    'signals': {
+        'bullish': '#24E1A6',
+        'bearish': '#FF5C8A'
+    }
+}
+
+MAX_TABS = 35
+# Fixed padding keeps tab width consistent as more tabs are added
+BASE_TAB_PADDING = 56
+MIN_TAB_PADDING = 56
+TAB_PADDING_DECAY = 4
+
+
+def _ensure_theme_file():
+    """Ensure the TradingView inspired theme file exists, generating it via Ruby when available."""
+    try:
+        if THEME_FILE.exists():
+            return
+        THEME_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ruby_exe = shutil.which("ruby")
+        if ruby_exe and THEME_SCRIPT.exists():
+            subprocess.run([ruby_exe, str(THEME_SCRIPT), str(THEME_FILE)], check=True)
+        else:
+            with open(THEME_FILE, "w", encoding="utf-8") as fallback_theme:
+                json.dump({
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "description": "Fallback theme (Ruby unavailable)",
+                    "palette": DEFAULT_THEME,
+                    "fonts": DEFAULT_THEME_META['fonts'],
+                    "ui_states": DEFAULT_THEME_META['ui_states'],
+                    "lighting": DEFAULT_THEME_META['lighting'],
+                    "signals": DEFAULT_THEME_META['signals']
+                }, fallback_theme, indent=2)
+    except Exception as theme_error:
+        logging.debug("Theme generation failed: %s", theme_error)
+
+
+def _load_theme():
+    palette = DEFAULT_THEME.copy()
+    meta = copy.deepcopy(DEFAULT_THEME_META)
+    try:
+        _ensure_theme_file()
+        with open(THEME_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        palette.update(data.get("palette", {}))
+        fonts = data.get("fonts", {})
+        meta['fonts'].update(fonts)
+        ui_states = data.get("ui_states", {})
+        meta['ui_states'].update(ui_states)
+        lighting = data.get("lighting", {})
+        meta['lighting'] = {**meta.get('lighting', {}), **lighting}
+        signals = data.get("signals", {})
+        meta['signals'] = {**meta.get('signals', {}), **signals}
+        meta['gradients'] = data.get("gradients", {})
+    except Exception as exc:
+        logging.warning("Could not load TradingView theme (%s); falling back to defaults.", exc)
+    return palette, meta
+
+
+DEEP_SEA_THEME, THEME_META = _load_theme()
+
+
+def _extract_font_family(font_decl: str | None, fallback: str) -> str:
+    if not font_decl:
+        return fallback
+    primary = font_decl.split(',')[0].strip()
+    primary = primary.strip('\"\' ')
+    return primary or fallback
+
+
+PRIMARY_FONT_FAMILY = _extract_font_family(THEME_META.get('fonts', {}).get('base_family'), 'Segoe UI')
+MONO_FONT_FAMILY = _extract_font_family(THEME_META.get('fonts', {}).get('mono_family'), 'JetBrains Mono')
 
 MARKET_STATE_LABELS = {
     "PRE": "Pre-Market",
@@ -1083,6 +1209,39 @@ def fetch_realtime_quote(symbol: str) -> tuple[float | None, str | None, dict | 
     REALTIME_QUOTE_CACHE[cache_key] = (price, now, quote if isinstance(quote, dict) else None)
     return price, market_state, quote if isinstance(quote, dict) else None
 
+
+def fetch_predefined_screener(scr_id: str, count: int = 20) -> list[dict[str, Any]]:
+    params = {"count": count, "scrIds": scr_id}
+    try:
+        resp = requests.get(YAHOO_SCREENER_URL, params=params, timeout=6)
+        resp.raise_for_status()
+        payload = resp.json()
+        result = payload.get("finance", {}).get("result", [])
+        if result:
+            quotes = result[0].get("quotes") or []
+            return quotes[:count]
+    except Exception as exc:  # pragma: no cover - network fallback
+        logging.debug("Screener fetch failed for %s: %s", scr_id, exc)
+    return []
+
+
+def fetch_multi_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    if not symbols:
+        return {}
+    try:
+        resp = requests.get(
+            YAHOO_MULTI_QUOTE_URL,
+            params={"symbols": ",".join(symbols)},
+            timeout=6,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        results = payload.get("quoteResponse", {}).get("result", [])
+        return {entry.get("symbol", ""): entry for entry in results}
+    except Exception as exc:  # pragma: no cover - network fallback
+        logging.debug("Multi-quote fetch failed: %s", exc)
+    return {}
+
 # --- Technical Analysis Signal Section ---
 TAAPI_KEY = os.getenv("TAAPI_KEY", "YOUR_TAAPI_KEY")  # Load from environment variable
 
@@ -1172,6 +1331,70 @@ def get_percent_gain(symbol):
         return None
     except Exception:
         return None
+
+# --- Stock symbol validation function ---
+def validate_stock_symbol(symbol):
+    """Validate if a stock symbol exists by checking if we can get basic info from it"""
+    if not symbol or not symbol.strip():
+        return False
+    
+    symbol = symbol.strip().upper()
+    
+    # Basic format validation - allow alphanumeric, dots, and hyphens
+    if not re.match(r'^[A-Z0-9\.\-]+$', symbol):
+        return False
+    
+    # Minimum and maximum length check
+    if len(symbol) < 1 or len(symbol) > 10:
+        return False
+    
+    try:
+        # Try to get basic info from the market data provider
+        ticker_obj = MARKET_DATA_PROVIDER.get_handle(symbol)
+        
+        # Try multiple validation methods
+        # 1. Try to get fast_info
+        try:
+            fast_info = ticker_obj.fast_info
+            if fast_info and hasattr(fast_info, 'last_price'):
+                return True
+        except:
+            pass
+        
+        # 2. Try to get basic info
+        try:
+            info = ticker_obj.get_info()
+            if info and isinstance(info, dict):
+                # Check for key indicators of a valid stock
+                if (info.get('symbol') or info.get('shortName') or 
+                    info.get('longName') or info.get('regularMarketPrice')):
+                    return True
+        except:
+            pass
+        
+        # 3. Try to get a small amount of historical data
+        try:
+            hist = ticker_obj.history(period="5d", interval="1d")
+            if hist is not None and not hist.empty and len(hist) > 0:
+                # Check if we have valid price data
+                if 'Close' in hist.columns and not hist['Close'].isna().all():
+                    return True
+        except:
+            pass
+        
+        # 4. Try to get last price
+        try:
+            last_price = MARKET_DATA_PROVIDER.get_last_price(symbol)
+            if last_price is not None and last_price > 0:
+                return True
+        except:
+            pass
+        
+        return False
+        
+    except Exception as e:
+        logging.debug(f"Stock validation failed for {symbol}: {e}")
+        return False
 
 # --- OpenAI Financial Analysis Section ---
 openai.api_key = os.getenv("OPENAI_API_KEY")  # Load from environment variable for security
@@ -1265,13 +1488,13 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
     
     # Calculate optimal chart size based on available space
     # Account for side panel (220px), margins, and other UI elements
-    available_width = screen_width - 320  # Side panel + margins
-    available_height = screen_height - 200  # Top bars + bottom elements
-    
+    available_width = max(screen_width - 220, 960)
+    available_height = max(screen_height - 160, 720)
+
     # Convert to inches for matplotlib (assuming 100 DPI)
-    width = max(12, min(available_width / 100, 20))  # Min 12", max 20"
-    height = max(8, min(available_height / 100, 14))  # Min 8", max 14"
-    
+    width = max(14, min(available_width / 90, 26))  # Widen default chart footprint
+    height = max(9, min(available_height / 90, 18))
+
     print(f"Chart size: {width:.1f}\" x {height:.1f}\"")  # Debug info
 
     # --- Deep Sea Blue Chart Colors ---
@@ -1289,42 +1512,13 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
     frame = tk.Frame(notebook)
     frame.pack(fill=tk.BOTH, expand=1)
 
-    # --- Chart container with toolbar on left ---
-    chart_container = tk.Frame(frame, bg=DEEP_SEA_THEME['primary_bg'])
-    chart_container.pack(fill=tk.BOTH, expand=1)
-
-    # Drawing Toolbar (left side of chart)
-    drawing_tools = [
-        ("Trendline", "📈"),
-        ("Horizontal", "━"),
-        ("Vertical", "┃"),
-        ("Fibonacci", "𝑭"),
-        ("Text", "📝"),
-        ("Rectangle", "▭"),
-        ("Ellipse", "◯"),
-        ("Triangle", "△"),
-        ("Freehand", "✏️"),
-        ("Eraser", "🧹"),
-        ("Clear", "❌"),
-        ("Crosshair", "+"),
-        ("Zoom", "🔍")
-    ]
-    toolbar_frame = tk.Frame(chart_container, bg=DEEP_SEA_THEME['secondary_bg'], width=56)
-    toolbar_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 2), pady=2)
-    toolbar_frame.pack_propagate(False)
-    for tool_name, icon in drawing_tools:
-        btn = tk.Button(toolbar_frame, text=icon, width=3, height=1, font=("Segoe UI", 14),
-                       bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary'])
-        btn.pack(side=tk.TOP, pady=3, padx=2)
-
-    # Ensure chart canvas is packed to the right of the toolbar
-    # Find or create the chart canvas after toolbar_frame
-    # Example for candlestick chart:
-    # canvas = FigureCanvasTkAgg(fig, master=chart_container)
-    # canvas.draw()
-    # canvas.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+    chart_container = None  # will be created inside draw_chart
 
     current_timeframe = tk.StringVar(value="1d")
+    current_price_step = getattr(frame, "current_price_step", None)
+    if current_price_step is None:
+        current_price_step = tk.DoubleVar(value=0.01)
+        frame.current_price_step = current_price_step
     auto_refresh_enabled = tk.BooleanVar(value=True)
     refresh_interval = 30000  # 30 seconds for auto-refresh
     refresh_timer = None
@@ -1601,7 +1795,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                 return empty_df, np.array([99, 101]), np.array([0]), 100, 100, "synthetic", realtime_meta
 
     def draw_chart(chart_type="Candlestick"):
-        nonlocal refresh_timer, last_tick_timer
+        nonlocal refresh_timer, last_tick_timer, chart_container
         footprint_active = chart_type == "Order Flow Footprint"
         if not footprint_active and hasattr(frame, "footprint_settings"):
             fp_state = frame.footprint_settings
@@ -1767,37 +1961,6 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                     self.tools_frame.pack(side=tk.TOP, fill=tk.Y, expand=1)
                     self.collapse_btn.config(text="⏴")
 
-        # Placeholder drawing logic handler
-        class DrawingManager:
-            def __init__(self, canvas):
-                self.canvas = canvas
-                self.active_tool = None
-                # Placeholder for storing drawings
-                self.drawings = []
-
-            def set_tool(self, tool):
-                self.active_tool = tool
-                # TODO: Integrate tool activation logic
-
-            # Placeholder methods for each tool
-            def draw_trendline(self): pass
-            def draw_ray(self): pass
-            def draw_hline(self): pass
-            def draw_vline(self): pass
-            def draw_fibonacci(self): pass
-            def draw_text(self): pass
-            def draw_rectangle(self): pass
-            def draw_ellipse(self): pass
-            def draw_triangle(self): pass
-            def draw_pencil(self): pass
-            def erase(self): pass
-            def clear_all(self): pass
-            def zoom(self): pass
-            def crosshair(self): pass
-            # TODO: Add undo/redo, edit/delete, sync, etc.
-
-    # (moved) Integrate Drawing Toolbar and Manager above
-        
         # Cancel any existing refresh timer
         if refresh_timer:
             frame.after_cancel(refresh_timer)
@@ -1813,10 +1976,313 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
         # Clear all existing widgets in chart frame
         for widget in frame.winfo_children():
             widget.destroy()
-            
+
+        drawing_groups = [
+            ("Trends", [
+                ("trendline", "📈", "Trendline"),
+                ("hline", "━", "Horizontal Line"),
+            ]),
+            ("Shapes", [
+                ("rectangle", "▭", "Rectangle"),
+            ]),
+            ("Brush", [
+                ("brush", "🖌", "Brush"),
+                ("pencil", "✏️", "Freehand"),
+            ]),
+            ("Annotation", [
+                ("text", "📝", "Text"),
+            ]),
+            ("Utility", [
+                ("eraser", "🧹", "Eraser"),
+                ("clear", "❌", "Clear All"),
+            ]),
+        ]
+
+        chart_shell = tk.Frame(frame, bg=DEEP_SEA_THEME['primary_bg'])
+
+        drawing_bar = tk.Frame(chart_shell, bg=DEEP_SEA_THEME['secondary_bg'], width=80, bd=1, relief='ridge')
+        drawing_bar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 4), pady=4)
+        drawing_bar.pack_propagate(False)
+
+        chart_container = tk.Frame(chart_shell, bg=DEEP_SEA_THEME['primary_bg'])
+        chart_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+
+        drawing_manager = getattr(frame, "drawing_manager", None)
+        if drawing_manager is None:
+            class _DrawingManager:
+                def __init__(self, parent_frame):
+                    self.parent = parent_frame
+                    self.active_tool = None
+                    self.canvas_widget = None
+                    self.figure = None
+                    self.axes = None
+                    self.drawn_items: list[Any] = []
+                    self._cids: list[int] = []
+                    self._pending: list[tuple[float, float]] = []
+                    self._current_line = None
+                    self._line_points: tuple[list[float], list[float]] | None = None
+                    self._mouse_down = False
+
+                def set_tool(self, tool_id: str) -> None:
+                    self.active_tool = tool_id
+                    self._pending.clear()
+                    if tool_id == 'clear':
+                        self.clear_all()
+                    if tool_id not in ('brush', 'pencil'):
+                        self._current_line = None
+                        self._line_points = None
+
+                def attach_canvas(self, canvas) -> None:
+                    if canvas is None:
+                        return
+                    if self.canvas_widget is canvas:
+                        return
+                    self._disconnect()
+                    self.canvas_widget = canvas
+                    self.figure = canvas.figure
+                    self.axes = self.figure.axes[0] if self.figure.axes else None
+                    self.drawn_items.clear()
+                    if self.canvas_widget and self.axes is not None:
+                        self._cids.append(self.canvas_widget.mpl_connect('button_press_event', self._on_press))
+                        self._cids.append(self.canvas_widget.mpl_connect('button_release_event', self._on_release))
+                        self._cids.append(self.canvas_widget.mpl_connect('motion_notify_event', self._on_motion))
+
+                def _disconnect(self) -> None:
+                    if self.canvas_widget is None:
+                        self._cids.clear()
+                        return
+                    for cid in self._cids:
+                        try:
+                            self.canvas_widget.mpl_disconnect(cid)
+                        except Exception:
+                            pass
+                    self._cids.clear()
+
+                def clear_all(self) -> None:
+                    for artist in list(self.drawn_items):
+                        try:
+                            artist.remove()
+                        except Exception:
+                            pass
+                    self.drawn_items.clear()
+                    if self.canvas_widget:
+                        self.canvas_widget.draw_idle()
+
+                def _on_press(self, event):
+                    if self.axes is None or event.inaxes != self.axes:
+                        return
+                    tool = self.active_tool
+                    if tool is None:
+                        return
+                    if tool == 'eraser':
+                        if self.drawn_items:
+                            artist = self.drawn_items.pop()
+                            try:
+                                artist.remove()
+                            except Exception:
+                                pass
+                            if self.canvas_widget:
+                                self.canvas_widget.draw_idle()
+                        return
+                    if tool == 'brush' or tool == 'pencil':
+                        self._mouse_down = True
+                        color = '#ffeb3b' if tool == 'brush' else '#ffffff'
+                        line, = self.axes.plot([event.xdata], [event.ydata], color=color, linewidth=1.6 if tool == 'brush' else 1.0, alpha=0.9)
+                        self._current_line = line
+                        self._line_points = ([event.xdata], [event.ydata])
+                        return
+                    if tool == 'trendline':
+                        if not self._pending:
+                            self._pending.append((event.xdata, event.ydata))
+                        else:
+                            x0, y0 = self._pending.pop(0)
+                            line, = self.axes.plot([x0, event.xdata], [y0, event.ydata], color='#ff9800', linewidth=1.6)
+                            self.drawn_items.append(line)
+                            if self.canvas_widget:
+                                self.canvas_widget.draw_idle()
+                        return
+                    if tool == 'hline':
+                        line = self.axes.axhline(event.ydata, color='#9ccc65', linestyle='--', linewidth=1.2)
+                        self.drawn_items.append(line)
+                        if self.canvas_widget:
+                            self.canvas_widget.draw_idle()
+                        return
+                    if tool == 'rectangle':
+                        if not self._pending:
+                            self._pending.append((event.xdata, event.ydata))
+                        else:
+                            x0, y0 = self._pending.pop(0)
+                            x1, y1 = event.xdata, event.ydata
+                            rect = Rectangle((min(x0, x1), min(y0, y1)), abs(x1 - x0), abs(y1 - y0),
+                                             fill=False, edgecolor='#29b6f6', linewidth=1.4)
+                            self.axes.add_patch(rect)
+                            self.drawn_items.append(rect)
+                            if self.canvas_widget:
+                                self.canvas_widget.draw_idle()
+                        return
+                    if tool == 'text':
+                        try:
+                            text_value = simpledialog.askstring("Text Label", "Enter label:", parent=self.parent)
+                        except Exception:
+                            text_value = None
+                        if text_value:
+                            annotation = self.axes.text(event.xdata, event.ydata, text_value,
+                                                        color='#fdd835', fontsize=10, weight='bold')
+                            self.drawn_items.append(annotation)
+                            if self.canvas_widget:
+                                self.canvas_widget.draw_idle()
+                        return
+
+                def _on_motion(self, event):
+                    if self.axes is None or event.inaxes != self.axes or not self._mouse_down:
+                        return
+                    if self.active_tool in ('brush', 'pencil') and self._current_line and self._line_points:
+                        xs, ys = self._line_points
+                        xs.append(event.xdata)
+                        ys.append(event.ydata)
+                        self._current_line.set_data(xs, ys)
+                        if self.canvas_widget:
+                            self.canvas_widget.draw_idle()
+
+                def _on_release(self, event):
+                    if self.active_tool in ('brush', 'pencil') and self._current_line is not None:
+                        self.drawn_items.append(self._current_line)
+                        self._current_line = None
+                        self._line_points = None
+                        if self.canvas_widget:
+                            self.canvas_widget.draw_idle()
+                    self._mouse_down = False
+
+            drawing_manager = _DrawingManager(frame)
+            frame.drawing_manager = drawing_manager
+
+        toolbar_buttons: dict[str, dict[str, Any]] = {}
+
+        def select_drawing_tool(tool_id: str) -> None:
+            drawing_manager.set_tool(tool_id)
+            frame.drawing_tool = tool_id
+            for key, meta in toolbar_buttons.items():
+                is_active = (key == tool_id)
+                button = meta['button']
+                label = meta['label']
+                container = meta['frame']
+                base_bg = DEEP_SEA_THEME['info'] if is_active else DEEP_SEA_THEME['surface_bg']
+                base_fg = DEEP_SEA_THEME['text_primary'] if is_active else DEEP_SEA_THEME['text_secondary']
+                border = DEEP_SEA_THEME['accent_bg'] if is_active else DEEP_SEA_THEME['border']
+                container.configure(bg=DEEP_SEA_THEME['secondary_bg'], highlightbackground=border, highlightthickness=1)
+                button.configure(bg=base_bg, fg=base_fg)
+                label.configure(bg=DEEP_SEA_THEME['secondary_bg'], fg=base_fg)
+
+        header = tk.Label(
+            drawing_bar,
+            text="TOOLS",
+            font=("Segoe UI", 9, "bold"),
+            bg=DEEP_SEA_THEME['secondary_bg'],
+            fg=DEEP_SEA_THEME['text_secondary']
+        )
+        header.pack(pady=(6, 2))
+
+        scroll_canvas = tk.Canvas(drawing_bar, bg=DEEP_SEA_THEME['secondary_bg'], highlightthickness=0)
+        scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+        scrollbar = ttk.Scrollbar(drawing_bar, orient=tk.VERTICAL, command=scroll_canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        inner = tk.Frame(scroll_canvas, bg=DEEP_SEA_THEME['secondary_bg'])
+        scroll_canvas.create_window((0, 0), window=inner, anchor='nw')
+        scroll_canvas.configure(yscrollcommand=scrollbar.set)
+
+        def _update_scroll_region(_event=None):
+            scroll_canvas.configure(scrollregion=scroll_canvas.bbox('all'))
+
+        inner.bind('<Configure>', _update_scroll_region)
+
+        preset_tool = getattr(frame, "drawing_tool", drawing_groups[0][1][0][0])
+
+        for group_name, tools in drawing_groups:
+            group_label = tk.Label(
+                inner,
+                text=group_name.upper(),
+                font=("Segoe UI", 8, "bold"),
+                bg=DEEP_SEA_THEME['secondary_bg'],
+                fg=DEEP_SEA_THEME['text_secondary']
+            )
+            group_label.pack(fill=tk.X, padx=6, pady=(8, 2))
+
+            group_frame = tk.Frame(inner, bg=DEEP_SEA_THEME['secondary_bg'])
+            group_frame.pack(fill=tk.X, padx=4)
+
+            for tool_id, icon, _label in tools:
+                tool_wrapper = tk.Frame(group_frame, bg=DEEP_SEA_THEME['secondary_bg'])
+                tool_wrapper.pack(fill=tk.X, pady=2, padx=2)
+
+                button = tk.Button(
+                    tool_wrapper,
+                    text=icon,
+                    width=3,
+                    height=1,
+                    font=("Segoe UI", 13),
+                    bg=DEEP_SEA_THEME['surface_bg'],
+                    fg=DEEP_SEA_THEME['text_primary'],
+                    relief='flat',
+                    command=lambda t=tool_id: select_drawing_tool(t),
+                    bd=0,
+                    activebackground=DEEP_SEA_THEME['hover'],
+                    activeforeground=DEEP_SEA_THEME['text_primary'],
+                    highlightthickness=0
+                )
+                button.pack(fill=tk.X, padx=1, pady=(0, 1))
+
+                label = tk.Label(
+                    tool_wrapper,
+                    text=_label,
+                    font=("Segoe UI", 7, "bold"),
+                    anchor='w',
+                    bg=DEEP_SEA_THEME['secondary_bg'],
+                    fg=DEEP_SEA_THEME['text_secondary']
+                )
+                label.pack(fill=tk.X, padx=2, pady=(0, 2))
+
+                def _make_enter(t_id):
+                    def _on_enter(_event):
+                        if frame.drawing_tool != t_id:
+                            meta = toolbar_buttons.get(t_id)
+                            if meta:
+                                meta['button'].configure(bg=DEEP_SEA_THEME['hover'])
+                    return _on_enter
+
+                def _make_leave(t_id):
+                    def _on_leave(_event):
+                        state = (frame.drawing_tool == t_id)
+                        meta = toolbar_buttons.get(t_id)
+                        if meta:
+                            meta['button'].configure(
+                                bg=DEEP_SEA_THEME['info'] if state else DEEP_SEA_THEME['surface_bg'],
+                                fg=DEEP_SEA_THEME['text_primary'] if state else DEEP_SEA_THEME['text_secondary']
+                            )
+                    return _on_leave
+
+                button.bind('<Enter>', _make_enter(tool_id))
+                button.bind('<Leave>', _make_leave(tool_id))
+
+                toolbar_buttons[tool_id] = {
+                    'button': button,
+                    'label': label,
+                    'frame': tool_wrapper,
+                }
+
+            separator = tk.Frame(inner, height=1, bg=DEEP_SEA_THEME['border'])
+            separator.pack(fill=tk.X, padx=4, pady=(4, 0))
+
+        select_drawing_tool(preset_tool)
+
+        def clear_chart_container() -> None:
+            for child in chart_container.winfo_children():
+                child.destroy()
+
         # Add control bar at the top of chart frame
         control_frame = tk.Frame(frame, bg=DEEP_SEA_THEME['secondary_bg'])
         control_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
+
+        chart_shell.pack(fill=tk.BOTH, expand=1)
 
         # --- Indicators state (persist across redraws) ---
         saved_state = get_indicator_state(symbol)
@@ -1954,24 +2420,41 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
 
 
         # Indicator dropdown button (beside Add Tab)
+        indicator_menu = tk.Menu(control_frame, tearoff=0, bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_primary'])
+        menu_state = {'open': False}
+
         def open_indicator_menu(event=None):
+            close_indicator_menu()
             try:
-                menu.tk_popup(indicator_btn.winfo_rootx(), indicator_btn.winfo_rooty() + indicator_btn.winfo_height())
+                indicator_menu.tk_popup(
+                    indicator_btn.winfo_rootx(),
+                    indicator_btn.winfo_rooty() + indicator_btn.winfo_height()
+                )
+                menu_state['open'] = True
             finally:
-                menu.grab_release()
+                indicator_menu.grab_release()
+
+        def close_indicator_menu(event=None):
+            if not menu_state['open']:
+                return
+            if event is not None and event.widget is indicator_btn:
+                return
+            try:
+                indicator_menu.unpost()
+            except Exception:
+                pass
+            menu_state['open'] = False
 
         indicator_btn = tk.Button(
             control_frame,
             text="Indicators ▾",
             command=open_indicator_menu,
-            font=("Segoe UI", 9, "bold"),
+            font=(PRIMARY_FONT_FAMILY, 9, "bold"),
             bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary'],
             activebackground=DEEP_SEA_THEME['hover'], activeforeground=DEEP_SEA_THEME['text_primary'],
             bd=2, relief="raised", width=12, height=1
         )
         indicator_btn.pack(side=tk.RIGHT, padx=(4, 2), pady=2)
-
-        menu = tk.Menu(indicator_btn, tearoff=0, bg=DEEP_SEA_THEME['secondary_bg'], fg=DEEP_SEA_THEME['text_primary'])
         def toggle_and_redraw(name):
             # Save current indicator state for this symbol and as global default
             try:
@@ -1980,16 +2463,140 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                 set_default_indicator_state(state_now)
             except Exception:
                 pass
+            close_indicator_menu()
             frame.after(10, lambda: draw_chart(chart_type=current_chart_type.get()))
 
+        def open_chart_settings_dialog():
+            if not hasattr(frame, "_chart_settings_window") or frame._chart_settings_window is None:
+                frame._chart_settings_window = None
+
+            existing = frame._chart_settings_window
+            if existing is not None and existing.winfo_exists():
+                existing.lift()
+                existing.focus_set()
+                return
+
+            price_step_var = tk.StringVar(value=str(max(current_price_step.get(), 0.01)))
+
+            settings_win = tk.Toplevel(frame)
+            settings_win.title("Chart Settings")
+            settings_win.configure(bg=DEEP_SEA_THEME['secondary_bg'])
+            settings_win.resizable(False, False)
+            settings_win.transient(frame.winfo_toplevel())
+            settings_win.grab_set()
+
+            frame._chart_settings_window = settings_win
+
+            tk.Label(
+                settings_win,
+                text="Price Step",
+                font=("Segoe UI", 11, "bold"),
+                bg=DEEP_SEA_THEME['secondary_bg'],
+                fg=DEEP_SEA_THEME['text_primary']
+            ).pack(padx=16, pady=(16, 8), anchor="w")
+
+            def apply_price_step():
+                value = price_step_var.get().strip()
+                try:
+                    step_val = float(value)
+                except ValueError:
+                    messagebox.showerror("Invalid Input", "Please enter a numeric price step.", parent=settings_win)
+                    return
+                if step_val <= 0:
+                    messagebox.showerror("Invalid Input", "Price step must be positive.", parent=settings_win)
+                    return
+                current_price_step.set(step_val)
+                draw_chart(current_chart_type.get())
+                on_close()
+
+            price_options = ["1", "0.1", "0.01", "0.001"]
+            dropdown = ttk.Combobox(
+                settings_win,
+                values=price_options,
+                textvariable=price_step_var,
+                state="readonly",
+                width=10
+            )
+            dropdown.pack(padx=16, pady=(0, 12), fill=tk.X)
+
+            def on_close():
+                if getattr(frame, "_chart_settings_window", None) is settings_win:
+                    frame._chart_settings_window = None
+                try:
+                    settings_win.destroy()
+                except Exception:
+                    pass
+
+            actions = tk.Frame(settings_win, bg=DEEP_SEA_THEME['secondary_bg'])
+            actions.pack(fill=tk.X, padx=16, pady=(0, 16))
+
+            tk.Button(
+                actions,
+                text="Apply",
+                command=apply_price_step,
+                font=("Segoe UI", 10, "bold"),
+                bg=DEEP_SEA_THEME['success'],
+                fg=DEEP_SEA_THEME['text_primary'],
+                activebackground=DEEP_SEA_THEME['active'],
+                activeforeground=DEEP_SEA_THEME['text_primary'],
+                bd=1,
+                relief="raised",
+                padx=10,
+                pady=4
+            ).pack(side=tk.RIGHT, padx=(8, 0))
+
+            tk.Button(
+                actions,
+                text="Cancel",
+                command=on_close,
+                font=("Segoe UI", 10, "bold"),
+                bg=DEEP_SEA_THEME['danger'],
+                fg=DEEP_SEA_THEME['text_primary'],
+                activebackground=DEEP_SEA_THEME['active'],
+                activeforeground=DEEP_SEA_THEME['text_primary'],
+                bd=1,
+                relief="raised",
+                padx=10,
+                pady=4
+            ).pack(side=tk.RIGHT)
+
+            settings_win.protocol("WM_DELETE_WINDOW", on_close)
+
+            settings_win.wait_visibility()
+            settings_win.focus_set()
+
+        settings_bar = tk.Frame(frame, bg=DEEP_SEA_THEME['secondary_bg'])
+        settings_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(8, 8))
+
+        chart_settings_btn = tk.Button(
+            settings_bar,
+            text="Chart Settings",
+            command=open_chart_settings_dialog,
+            font=("Segoe UI", 9, "bold"),
+            bg=DEEP_SEA_THEME['surface_bg'],
+            fg=DEEP_SEA_THEME['text_primary'],
+            activebackground=DEEP_SEA_THEME['hover'],
+            activeforeground=DEEP_SEA_THEME['text_primary'],
+            bd=1,
+            relief="raised",
+            padx=10,
+            pady=4
+        )
+        chart_settings_btn.pack(side=tk.RIGHT)
+
         for name in ["RSI", "SMA 20", "EMA 50", "Bollinger (20,2)", "VWAP", "MACD"]:
-            menu.add_checkbutton(
+            indicator_menu.add_checkbutton(
                 label=name,
                 onvalue=True,
                 offvalue=False,
                 variable=indicator_vars[name],
                 command=lambda n=name: toggle_and_redraw(n)
             )
+
+        toplevel = frame.winfo_toplevel()
+        if not hasattr(toplevel, "_indicator_menu_close_bound"):
+            toplevel.bind('<Button-1>', close_indicator_menu, add='+')
+            setattr(toplevel, "_indicator_menu_close_bound", True)
 
         # Indicator bar shows active indicator tags
         indicator_bar = tk.Frame(control_frame, bg=DEEP_SEA_THEME['surface_bg'], width=220, height=32, highlightbackground=DEEP_SEA_THEME['border'], highlightthickness=1)
@@ -2005,39 +2612,217 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                 )
                 tag.pack(side=tk.LEFT, padx=2)
 
-        # Add Tab button (next to indicator bar)
-        def add_tab():
-            new_symbol = simpledialog.askstring("Add Tab", "Enter the stock ticker symbol (e.g., MSFT):", parent=frame)
+        # --- Tab management helpers ---
+        def ensure_plus_tab():
+            if not hasattr(notebook, "_plus_tab"):
+                notebook._plus_tab = None
+            style_hook = getattr(notebook, '_update_tab_style', None)
+            if callable(style_hook):
+                style_hook()
+
+        def _tab_limit_reached() -> bool:
+            limit_fn = getattr(notebook, '_tab_limit_reached', None)
+            return bool(limit_fn()) if callable(limit_fn) else False
+
+        def _real_tab_ids_safe() -> list[str]:
+            real_fn = getattr(notebook, '_real_tab_ids_fn', None)
+            if callable(real_fn):
+                try:
+                    result = real_fn()
+                    return list(result) if isinstance(result, (list, tuple)) else []
+                except Exception:
+                    return []
+            return []
+
+        def _show_add_tab_dialog() -> str | None:
+            parent = notebook.winfo_toplevel()
+            dialog = tk.Toplevel(parent)
+            dialog.title("Add Tab")
+            dialog.configure(bg=DEEP_SEA_THEME['secondary_bg'])
+            dialog.resizable(False, False)
+            dialog.transient(parent)
+            dialog.grab_set()
+
+            pad = 12
+            tk.Label(
+                dialog,
+                text="Enter ticker symbol",
+                fg=DEEP_SEA_THEME['text_primary'],
+                bg=DEEP_SEA_THEME['secondary_bg'],
+                font=("Segoe UI", 11, "bold")
+            ).pack(padx=pad, pady=(pad, 6))
+
+            entry_var = tk.StringVar()
+            entry = tk.Entry(
+                dialog,
+                textvariable=entry_var,
+                width=26,
+                font=("Segoe UI", 12),
+                bg=DEEP_SEA_THEME['surface_bg'],
+                fg=DEEP_SEA_THEME['text_primary'],
+                insertbackground=DEEP_SEA_THEME['text_primary'],
+                relief='flat'
+            )
+            entry.pack(padx=pad, pady=(0, 10))
+            entry.focus_set()
+
+            watchlist_frame = tk.Frame(dialog, bg=DEEP_SEA_THEME['secondary_bg'])
+            watchlist_frame.pack(padx=pad, pady=(0, pad), fill=tk.BOTH)
+
+            tk.Label(
+                watchlist_frame,
+                text="Watchlist",
+                fg=DEEP_SEA_THEME['text_secondary'],
+                bg=DEEP_SEA_THEME['secondary_bg'],
+                font=("Segoe UI", 10, "bold")
+            ).pack(anchor='w')
+
+            watch_symbols = []
+            try:
+                watch_symbols = load_watchlist()
+            except Exception:
+                watch_symbols = DEFAULT_WATCHLIST
+
+            listbox = tk.Listbox(
+                watchlist_frame,
+                listvariable=tk.StringVar(value=watch_symbols),
+                height=min(8, max(3, len(watch_symbols))),
+                bg=DEEP_SEA_THEME['surface_bg'],
+                fg=DEEP_SEA_THEME['text_primary'],
+                selectbackground=DEEP_SEA_THEME['info'],
+                selectforeground=DEEP_SEA_THEME['text_primary'],
+                relief='flat'
+            )
+            listbox.pack(fill=tk.BOTH, expand=1, pady=4)
+
+            result = {'symbol': None}
+
+            def sanitize(value: str) -> str:
+                value = value.strip().upper()
+                value = re.sub(r'[^A-Z0-9\.\-]', '', value)
+                return value
+
+            def on_choose_from_list(event=None):
+                selection = listbox.curselection()
+                if selection:
+                    entry_var.set(watch_symbols[selection[0]])
+                    on_submit()
+
+            def on_submit(event=None):
+                sym = sanitize(entry_var.get())
+                if sym:
+                    # Validate the stock symbol before adding
+                    if validate_stock_symbol(sym):
+                        result['symbol'] = sym
+                        dialog.destroy()
+                    else:
+                        messagebox.showerror("Invalid Stock Symbol", 
+                                           f"'{sym}' is not a valid stock symbol. No market data could be found.\n\nPlease enter a valid ticker symbol.")
+                else:
+                    messagebox.showinfo("Add Tab", "Please enter a valid ticker symbol.")
+
+            def on_cancel(event=None):
+                dialog.destroy()
+
+            buttons = tk.Frame(dialog, bg=DEEP_SEA_THEME['secondary_bg'])
+            buttons.pack(pady=(0, pad))
+
+            tk.Button(
+                buttons,
+                text="Add",
+                command=on_submit,
+                font=("Segoe UI", 10, "bold"),
+                bg=DEEP_SEA_THEME['success'],
+                fg=DEEP_SEA_THEME['text_primary'],
+                activebackground=DEEP_SEA_THEME['active'],
+                activeforeground=DEEP_SEA_THEME['text_primary'],
+                bd=0,
+                padx=16,
+                pady=6
+            ).pack(side=tk.LEFT, padx=(0, 8))
+
+            tk.Button(
+                buttons,
+                text="Cancel",
+                command=on_cancel,
+                font=("Segoe UI", 10, "bold"),
+                bg=DEEP_SEA_THEME['danger'],
+                fg=DEEP_SEA_THEME['text_primary'],
+                activebackground=DEEP_SEA_THEME['active'],
+                activeforeground=DEEP_SEA_THEME['text_primary'],
+                bd=0,
+                padx=16,
+                pady=6
+            ).pack(side=tk.LEFT)
+
+            listbox.bind('<Double-Button-1>', on_choose_from_list)
+            dialog.bind('<Return>', on_submit)
+            dialog.bind('<Escape>', on_cancel)
+
+            dialog.wait_window()
+            return result['symbol']
+
+        def open_symbol_tab(symbol: str | None) -> bool:
+            if not symbol:
+                return False
+            new_symbol = symbol.strip().upper()
             if not new_symbol:
+                return False
+            if _tab_limit_reached():
+                messagebox.showinfo("Tab Limit Reached", f"Close a tab before opening a new one (max {MAX_TABS}).")
+                return False
+            try:
+                new_ticker = get_market_handle(new_symbol)
+                new_hist = new_ticker.history(period="2d")
+                if len(new_hist) < 2:
+                    messagebox.showerror("Error", f"Not enough data for {new_symbol}.")
+                    return False
+                new_prev_close = new_hist['Close'].iloc[0]
+                new_latest_close = new_hist['Close'].iloc[1]
+                new_percent_gain = ((new_latest_close - new_prev_close) / new_prev_close) * 100
+                new_ta_signal = get_ta_signal(new_symbol)
+                new_rsi = get_rsi(new_symbol) or 0
+                new_analysis = get_in_depth_analysis(new_symbol)
+                new_frame = show_chart_with_points(new_symbol, new_ticker, new_prev_close, new_latest_close, new_percent_gain, new_ta_signal, new_rsi, new_analysis, notebook, new_symbol)
+                ensure_plus_tab()
+                style_hook = getattr(notebook, '_update_tab_style', None)
+                if callable(style_hook):
+                    style_hook()
+                if new_frame is not None:
+                    notebook.select(new_frame)
+                    notebook._last_real_tab = str(new_frame)
+                return True
+            except Exception as err:
+                messagebox.showerror("Error", f"Failed to add tab for {new_symbol}: {err}")
+            return False
+
+        def prompt_add_tab():
+            if _tab_limit_reached():
+                messagebox.showinfo("Tab Limit Reached", f"Close a tab before opening a new one (max {MAX_TABS}).")
                 return
-            new_ticker = get_market_handle(new_symbol)
-            new_hist = new_ticker.history(period="2d")
-            if len(new_hist) < 2:
-                messagebox.showerror("Error", f"Not enough data for {new_symbol}.")
-                return
-            new_prev_close = new_hist['Close'].iloc[0]
-            new_latest_close = new_hist['Close'].iloc[1]
-            new_percent_gain = ((new_latest_close - new_prev_close) / new_prev_close) * 100
-            new_ta_signal = get_ta_signal(new_symbol)
-            new_rsi = get_rsi(new_symbol)
-            new_analysis = get_in_depth_analysis(new_symbol)
-            show_chart_with_points(new_symbol, new_ticker, new_prev_close, new_latest_close, new_percent_gain, new_ta_signal, new_rsi, new_analysis, notebook, new_symbol)
+            new_symbol = _show_add_tab_dialog()
+            if new_symbol:
+                open_symbol_tab(new_symbol)
 
-        add_tab_btn = tk.Button(control_frame, text="+ Add Tab", command=add_tab, font=("Segoe UI", 9, "bold"),
-                               bg="#4CAF50", fg="#E8F5E8", activebackground="#66BB6A", activeforeground="#FFFFFF",
-                               bd=2, relief="raised", width=10, height=1)
-        add_tab_btn.pack(side=tk.RIGHT, padx=(4, 2), pady=2)
+        notebook._ensure_plus_tab = ensure_plus_tab
+        notebook._prompt_add_tab = prompt_add_tab
+        notebook._open_symbol_tab = open_symbol_tab
+        notebook._last_real_tab = None
 
-        # Close Tab button (next to Add Tab)
-        def close_tab():
-            current = notebook.index(notebook.select())
-            if current >= 0:
-                notebook.forget(current)
+        def on_tab_changed(_event=None):
+            current = notebook.select()
+            if current:
+                notebook._last_real_tab = current
+            style_hook = getattr(notebook, '_update_tab_style', None)
+            if callable(style_hook):
+                style_hook()
 
-        close_tab_btn = tk.Button(control_frame, text="X Close Tab", command=close_tab, font=("Segoe UI", 9, "bold"),
-                                 bg="#D32F2F", fg="#FFEBEE", activebackground="#F44336", activeforeground="#FFFFFF",
-                                 bd=2, relief="raised", width=10, height=1)
-        close_tab_btn.pack(side=tk.RIGHT, padx=(2, 2), pady=2)
+            highlight_fn = getattr(notebook, '_update_tab_highlight', None)
+            if callable(highlight_fn):
+                highlight_fn()
+
+        notebook.bind('<<NotebookTabChanged>>', on_tab_changed, add='+')
+        ensure_plus_tab()
 
         # Control buttons frame
         controls_frame = tk.Frame(control_frame, bg=DEEP_SEA_THEME['secondary_bg'])
@@ -2193,25 +2978,23 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
             interval_choice = fp_state["interval_var"].get()
             show_profile_var = fp_state["show_profile_var"]
 
-            chart_container = tk.Frame(frame, bg=DEEP_SEA_THEME['primary_bg'])
-            chart_container.pack(fill=tk.BOTH, expand=1)
-
             def update_canvas(fig):
                 if not chart_container.winfo_exists():
                     plt.close(fig)
                     return
-                for child in chart_container.winfo_children():
-                    child.destroy()
+                clear_chart_container()
                 canvas = FigureCanvasTkAgg(fig, master=chart_container)
                 canvas.draw()
                 canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
                 fp_state['canvas'] = canvas
+                drawing_manager.attach_canvas(canvas)
                 plt.close(fig)
 
             ticks_df, inferred_tick = fetch_symbol_ticks(symbol, interval_choice)
             tick_size = inferred_tick if inferred_tick > 0 else 0.01
 
             if ticks_df.empty:
+                clear_chart_container()
                 msg = tk.Label(
                     chart_container,
                     text="No footprint data available",
@@ -2298,9 +3081,11 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                     ax.title.set_color(DEEP_SEA_THEME['text_primary'])
                     ax.grid(True, color=DEEP_SEA_THEME['border'], linestyle='--', linewidth=0.3, alpha=0.4)
 
-                canvas = FigureCanvasTkAgg(fig, master=frame)
+                clear_chart_container()
+                canvas = FigureCanvasTkAgg(fig, master=chart_container)
                 canvas.draw()
                 canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
+                drawing_manager.attach_canvas(canvas)
 
                 total_buy = stats.get('total_buy_volume', 0.0)
                 total_sell = stats.get('total_sell_volume', 0.0)
@@ -2358,9 +3143,11 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                         for text in legend.get_texts():
                             text.set_color(DEEP_SEA_THEME['text_primary'])
                 
-                canvas = FigureCanvasTkAgg(fig, master=frame)
+                clear_chart_container()
+                canvas = FigureCanvasTkAgg(fig, master=chart_container)
                 canvas.draw()
                 canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
+                drawing_manager.attach_canvas(canvas)
                 
                 print(f"Volume Profile chart rendered for {symbol}")
                 print(f"  POC: ${stats['poc_price']:.2f}")
@@ -2434,14 +3221,11 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
                     ax.title.set_color(DEEP_SEA_THEME['text_primary'])
                     ax.grid(True, color=DEEP_SEA_THEME['border'], linestyle='-', linewidth=0.3)
                     
-                    # Create chart container
-                    chart_container = tk.Frame(frame, bg=DEEP_SEA_THEME['primary_bg'])
-                    chart_container.pack(fill=tk.BOTH, expand=1, padx=2, pady=2)
-                    
-                    # Create canvas
+                    clear_chart_container()
                     canvas = FigureCanvasTkAgg(fig, master=chart_container)
                     canvas.draw()
                     canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
+                    drawing_manager.attach_canvas(canvas)
                     
                     print(f"Overflow chart rendered: {chart_type}")
                     print(f"  Data points: {len(overflow_df)}")
@@ -2506,8 +3290,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
         ax_bottom1.set_navigate(True)
         
         # Chart container with scrollable canvas
-        chart_container = tk.Frame(frame, bg=DEEP_SEA_THEME['primary_bg'])
-        chart_container.pack(fill=tk.BOTH, expand=1, padx=2, pady=2)
+        clear_chart_container()
 
         width_candle = 0.6
 
@@ -2773,8 +3556,9 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
         else:
             ax_vp.set_visible(False)
 
-        # Apply tight layout for better spacing
-        plt.tight_layout()
+        # Apply tight layout for better spacing while minimizing padding
+        fig.tight_layout(pad=0.5)
+        fig.subplots_adjust(left=0.035, right=0.99, top=0.95, bottom=0.08, hspace=0.04, wspace=0.02)
 
         canvas = FigureCanvasTkAgg(fig, master=chart_container)
         canvas.draw()
@@ -2788,6 +3572,7 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
         # Pack canvas and toolbar
         toolbar.pack(side=tk.TOP, fill=tk.X)
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
+        drawing_manager.attach_canvas(canvas)
         
         # Simplified mouse interaction
         def on_scroll(event):
@@ -2898,33 +3683,69 @@ def show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gai
     draw_chart("Candlestick")
 
     # Add the tab to the notebook
+    plus_tab = getattr(notebook, "_plus_tab", None)
+    plus_id = str(plus_tab) if plus_tab is not None else None
+    if plus_tab is not None and plus_id in notebook.tabs():
+        notebook.forget(plus_tab)
+
     notebook.add(frame, text=tab_title)
+    notebook.select(frame)
+
+    ensure_plus = getattr(notebook, "_ensure_plus_tab", None)
+    update_style = getattr(notebook, "_update_tab_style", None)
+    if callable(ensure_plus):
+        ensure_plus()
+    if callable(update_style):
+        update_style()
+
+    register_tab = getattr(notebook, "_register_tab_button", None)
+    if callable(register_tab):
+        register_tab(frame, tab_title)
+
+    if hasattr(notebook, "_last_real_tab"):
+        notebook._last_real_tab = str(frame)
+
+    return frame
 
 WATCHLIST_FILE = "watchlist.json"
+DEFAULT_WATCHLIST = [
+    "SPY",
+    "QQQ",
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "TSLA",
+    "BTC-USD",
+    "ETH-USD",
+]
+
 
 def load_watchlist():
+    fallback = DEFAULT_WATCHLIST.copy()
     try:
-        path = get_user_data_path("watchlist.json")
+        path = get_user_data_path(WATCHLIST_FILE)
         if os.path.exists(path):
             with open(path, "r") as f:
                 data = json.load(f)
-                if isinstance(data, list):
-                    print(f"Loaded watchlist with {len(data)} items: {data}")
+                if isinstance(data, list) and data:
+                    logging.debug("Loaded watchlist with %d items", len(data))
                     return data
-        print("No existing watchlist found, creating new one")
+        logging.info("Bootstrapping watchlist with default symbols: %s", fallback)
+        save_watchlist(fallback)
     except Exception as e:
-        print(f"Error loading watchlist: {e}")
-    return []
+        logging.debug("Error loading watchlist (%s); using defaults", e)
+    return fallback
+
 
 def save_watchlist(watchlist):
     try:
-        path = get_user_data_path("watchlist.json")
+        path = get_user_data_path(WATCHLIST_FILE)
         with open(path, "w") as f:
             json.dump(watchlist, f, indent=2)
-        print(f"Saved watchlist with {len(watchlist)} items to {path}")
+        logging.debug("Saved watchlist with %d items to %s", len(watchlist), path)
         return True
     except Exception as e:
-        print(f"Error saving watchlist: {e}")
+        logging.debug("Error saving watchlist: %s", e)
         return False
 
 # --- Indicator preferences persistence ---
@@ -4220,14 +5041,37 @@ def main_tabbed_chart():
             tabs = load_custom_tabs()
             current = tabs[i].strip().upper()
             prompt = f"Enter ticker for Quick Tab {i+1}" + (f" (currently: {current})" if current else "")
-            new = simpledialog.askstring("Set Quick Tab", prompt + ":", parent=root)
-            if new is None:
-                return
-            new = new.strip().upper()
-            new = re.sub(r"[^A-Z0-9\.\-]", "", new)
-            tabs[i] = new
-            save_custom_tabs(tabs)
-            refresh_quick_tabs()
+            
+            while True:
+                new = simpledialog.askstring("Set Quick Tab", prompt + ":", parent=root)
+                if new is None:
+                    return  # User cancelled
+                
+                new = new.strip().upper()
+                new = re.sub(r"[^A-Z0-9\.\-]", "", new)
+                
+                # Allow empty string to clear the tab
+                if new == "":
+                    tabs[i] = new
+                    save_custom_tabs(tabs)
+                    refresh_quick_tabs()
+                    return
+                
+                # Validate the stock symbol
+                if validate_stock_symbol(new):
+                    tabs[i] = new
+                    save_custom_tabs(tabs)
+                    refresh_quick_tabs()
+                    return
+                else:
+                    # Show error and ask again
+                    result = messagebox.askyesno(
+                        "Invalid Stock Symbol", 
+                        f"'{new}' is not a valid stock symbol. No market data could be found.\n\nWould you like to try another symbol?",
+                        parent=root
+                    )
+                    if not result:
+                        return  # User chose not to try again
 
         def handle_quick_tab_click(i):
             tabs = load_custom_tabs()
@@ -4305,7 +5149,7 @@ def main_tabbed_chart():
         cal_outer, _ = make_card(grid, "Calendars", "Explore the world's financial events", width=340, height=220)
         cal_outer.grid(row=0, column=2, sticky="nsew", padx=(12, 0), pady=(0, 12))
 
-        # Row 2: News Flow (left), Heatmaps (center), Options (right)
+        # Row 2: News Flow (left), Heatmaps (center), Markets (right)
         news_outer, news_card = make_card(grid, "News Flow", "US stock headlines", width=340, height=220)
         news_outer.grid(row=1, column=0, sticky="nsew", padx=(0, 12), pady=12)
         # Add a button to open the live news window
@@ -4360,8 +5204,25 @@ def main_tabbed_chart():
             preview.create_text(x0+cell_w/2, y0+18, text=tkr, fill=DEEP_SEA_THEME['text_primary'], font=("Segoe UI", 9, "bold"))
             preview.create_text(x0+cell_w/2, y0+36, text=f"{val:+.2f}%", fill=DEEP_SEA_THEME['text_primary'], font=("Segoe UI", 9))
 
-        opts_outer, _ = make_card(grid, "Options", "Build your best strategy", width=340, height=220)
-        opts_outer.grid(row=1, column=2, sticky="nsew", padx=(12, 0), pady=12)
+        markets_outer, markets_card = make_card(grid, "Markets", "Top gainers, losers, and active movers", width=340, height=220)
+        markets_outer.grid(row=1, column=2, sticky="nsew", padx=(12, 0), pady=12)
+
+        tk.Button(
+            markets_card,
+            text="Open Market Movers",
+            command=show_markets_view,
+            font=("Segoe UI", 11, "bold"),
+            bg=DEEP_SEA_THEME['success'],
+            fg=DEEP_SEA_THEME['text_primary'],
+            activebackground=DEEP_SEA_THEME['active'],
+            activeforeground=DEEP_SEA_THEME['text_primary'],
+            bd=2,
+            relief="raised",
+            padx=12,
+            pady=8
+        ).pack(padx=16, pady=16, anchor="w")
+
+        markets_card.bind("<Button-1>", lambda _e: show_markets_view())
 
         # Bottom spacer
         tk.Frame(home_frame, bg=DEEP_SEA_THEME['primary_bg'], height=8).pack(fill=tk.X)
@@ -4399,6 +5260,419 @@ def main_tabbed_chart():
         # Create trading interface with the stock data
         create_trading_interface(symbol, ticker, prev_close, latest_close, percent_gain, ta_signal, rsi_val, analysis)
         
+    def show_markets_view():
+        clear_main_content()
+
+        markets_frame = tk.Frame(main_content, bg=DEEP_SEA_THEME['primary_bg'])
+        markets_frame.pack(fill=tk.BOTH, expand=1)
+
+        header_row = tk.Frame(markets_frame, bg=DEEP_SEA_THEME['primary_bg'])
+        header_row.pack(fill=tk.X, padx=24, pady=(18, 12))
+
+        home_btn = tk.Button(
+            header_row,
+            text="HOME",
+            command=create_home_page,
+            font=("Segoe UI", 10, "bold"),
+            bg=DEEP_SEA_THEME['surface_bg'],
+            fg=DEEP_SEA_THEME['text_primary'],
+            activebackground=DEEP_SEA_THEME['hover'],
+            activeforeground=DEEP_SEA_THEME['text_primary'],
+            bd=2,
+            relief="raised",
+            padx=14,
+            pady=4
+        )
+        home_btn.pack(side=tk.LEFT)
+
+        status_var = tk.StringVar(value="")
+
+        status_label = tk.Label(
+            header_row,
+            textvariable=status_var,
+            font=("Segoe UI", 9),
+            bg=DEEP_SEA_THEME['primary_bg'],
+            fg=DEEP_SEA_THEME['text_secondary']
+        )
+        status_label.pack(side=tk.RIGHT, padx=(0, 12))
+
+        refresh_btn = tk.Button(
+            header_row,
+            text="Refresh",
+            font=("Segoe UI", 9, "bold"),
+            bg=DEEP_SEA_THEME['info'],
+            fg=DEEP_SEA_THEME['text_primary'],
+            activebackground=DEEP_SEA_THEME['active'],
+            activeforeground=DEEP_SEA_THEME['text_primary'],
+            bd=1,
+            relief="raised",
+            padx=12,
+            pady=4
+        )
+        refresh_btn.pack(side=tk.RIGHT, padx=(0, 12))
+
+        hero_title = tk.Label(
+            markets_frame,
+            text="Markets, everywhere ▾",
+            font=("Segoe UI", 28, "bold"),
+            bg=DEEP_SEA_THEME['primary_bg'],
+            fg=DEEP_SEA_THEME['text_primary']
+        )
+        hero_title.pack(anchor='w', padx=24, pady=(0, 14))
+
+        major_section = tk.Frame(markets_frame, bg=DEEP_SEA_THEME['primary_bg'])
+        major_section.pack(fill=tk.X, padx=24)
+
+        tk.Label(
+            major_section,
+            text="Indices ›",
+            font=("Segoe UI", 15, "bold"),
+            bg=DEEP_SEA_THEME['primary_bg'],
+            fg=DEEP_SEA_THEME['text_primary']
+        ).pack(anchor='w', pady=(0, 8))
+
+        major_cards_frame = tk.Frame(major_section, bg=DEEP_SEA_THEME['primary_bg'])
+        major_cards_frame.pack(fill=tk.X)
+
+        major_widgets: dict[str, dict[str, tk.Widget]] = {}
+
+        def build_major_cards():
+            for info in MAJOR_INDEX_CARDS:
+                card = tk.Frame(
+                    major_cards_frame,
+                    bg='#1a1d28',
+                    bd=0,
+                    highlightthickness=1,
+                    highlightbackground='#2b3242',
+                    padx=14,
+                    pady=12
+                )
+                card.pack(side=tk.LEFT, padx=6, pady=6, fill=tk.Y)
+
+                tag = tk.Label(
+                    card,
+                    text=info['tag'],
+                    font=("Segoe UI", 10, "bold"),
+                    bg='#2f374a',
+                    fg=DEEP_SEA_THEME['text_primary'],
+                    width=6,
+                    relief='flat'
+                )
+                tag.pack(anchor='w')
+
+                name_lbl = tk.Label(
+                    card,
+                    text=info['name'],
+                    font=("Segoe UI", 11, "bold"),
+                    bg='#1a1d28',
+                    fg=DEEP_SEA_THEME['text_primary']
+                )
+                name_lbl.pack(anchor='w', pady=(8, 4))
+
+                price_lbl = tk.Label(
+                    card,
+                    text="—",
+                    font=("Segoe UI", 14, "bold"),
+                    bg='#1a1d28',
+                    fg=DEEP_SEA_THEME['text_primary']
+                )
+                price_lbl.pack(anchor='w')
+
+                change_lbl = tk.Label(
+                    card,
+                    text="—",
+                    font=("Segoe UI", 10, "bold"),
+                    bg='#1a1d28',
+                    fg=DEEP_SEA_THEME['text_secondary']
+                )
+                change_lbl.pack(anchor='w', pady=(2, 0))
+
+                major_widgets[info['symbol']] = {
+                    'frame': card,
+                    'price': price_lbl,
+                    'change': change_lbl,
+                }
+
+        build_major_cards()
+
+        chart_section = tk.Frame(markets_frame, bg=DEEP_SEA_THEME['primary_bg'])
+        chart_section.pack(fill=tk.BOTH, expand=0, padx=24, pady=(14, 18))
+
+        chart_header = tk.Frame(chart_section, bg=DEEP_SEA_THEME['primary_bg'])
+        chart_header.pack(fill=tk.X)
+
+        chart_title_lbl = tk.Label(
+            chart_header,
+            text="S&P 500 Overview",
+            font=("Segoe UI", 13, "bold"),
+            bg=DEEP_SEA_THEME['primary_bg'],
+            fg=DEEP_SEA_THEME['text_primary']
+        )
+        chart_title_lbl.pack(side=tk.LEFT)
+
+        timeframe_frame = tk.Frame(chart_header, bg=DEEP_SEA_THEME['primary_bg'])
+        timeframe_frame.pack(side=tk.RIGHT)
+
+        chart_holder = tk.Frame(chart_section, bg=DEEP_SEA_THEME['primary_bg'])
+        chart_holder.pack(fill=tk.BOTH, expand=1, pady=(8, 0))
+
+        chart_canvas = {'widget': None}
+        chart_symbol = '^GSPC'
+
+        timeframe_definitions = {
+            '1D': ('5d', '5m'),
+            '5D': ('1mo', '15m'),
+            '1M': ('3mo', '1h'),
+            '6M': ('1y', '1d'),
+            '1Y': ('2y', '1d'),
+        }
+
+        timeframe_buttons: dict[str, tk.Button] = {}
+        current_timeframe = tk.StringVar(value='1D')
+
+        def update_timeframe_buttons():
+            for key, btn in timeframe_buttons.items():
+                active = (current_timeframe.get() == key)
+                btn.configure(
+                    bg=DEEP_SEA_THEME['info'] if active else DEEP_SEA_THEME['surface_bg'],
+                    fg=DEEP_SEA_THEME['text_primary'] if active else DEEP_SEA_THEME['text_secondary']
+                )
+
+        def draw_index_chart() -> None:
+            config = timeframe_definitions.get(current_timeframe.get(), ('5d', '5m'))
+            try:
+                handle = get_market_handle(chart_symbol)
+                hist = handle.history(period=config[0], interval=config[1])
+            except Exception:
+                hist = None
+
+            for child in chart_holder.winfo_children():
+                child.destroy()
+            chart_canvas['widget'] = None
+
+            if hist is None or hist.empty:
+                tk.Label(
+                    chart_holder,
+                    text="Unable to load index chart.",
+                    font=("Segoe UI", 11),
+                    bg=DEEP_SEA_THEME['primary_bg'],
+                    fg=DEEP_SEA_THEME['text_secondary']
+                ).pack(expand=1)
+                return
+
+            hist = hist.dropna(subset=['Close'])
+            plt.close('all')
+            fig = plt.figure(figsize=(9.5, 3.4), facecolor=DEEP_SEA_THEME['primary_bg'])
+            ax = fig.add_subplot(111)
+            ax.plot(hist.index, hist['Close'], color='#00c9a7', linewidth=2)
+            ax.set_facecolor(DEEP_SEA_THEME['primary_bg'])
+            ax.tick_params(colors=DEEP_SEA_THEME['text_secondary'])
+            ax.grid(alpha=0.12, color='#253040')
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.spines['left'].set_color('#2f3a4b')
+            ax.spines['bottom'].set_color('#2f3a4b')
+            fig.autofmt_xdate()
+            fig.tight_layout()
+
+            canvas = FigureCanvasTkAgg(fig, master=chart_holder)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=1)
+            chart_canvas['widget'] = canvas
+
+        for key in timeframe_definitions.keys():
+            btn = tk.Button(
+                timeframe_frame,
+                text=key,
+                font=("Segoe UI", 9, "bold"),
+                bg=DEEP_SEA_THEME['surface_bg'],
+                fg=DEEP_SEA_THEME['text_secondary'],
+                bd=0,
+                relief='flat',
+                padx=10,
+                pady=4,
+                command=lambda t=key: (current_timeframe.set(t), update_timeframe_buttons(), draw_index_chart())
+            )
+            btn.pack(side=tk.LEFT, padx=4)
+            timeframe_buttons[key] = btn
+
+        update_timeframe_buttons()
+
+        movers_section = tk.Frame(markets_frame, bg=DEEP_SEA_THEME['primary_bg'])
+        movers_section.pack(fill=tk.BOTH, expand=1, padx=24, pady=(0, 18))
+
+        movers_label = tk.Label(
+            movers_section,
+            text="Market Movers",
+            font=("Segoe UI", 15, "bold"),
+            bg=DEEP_SEA_THEME['primary_bg'],
+            fg=DEEP_SEA_THEME['text_primary']
+        )
+        movers_label.pack(anchor='w', pady=(0, 8))
+
+        movers_grid = tk.Frame(movers_section, bg=DEEP_SEA_THEME['primary_bg'])
+        movers_grid.pack(fill=tk.BOTH, expand=1)
+
+        list_trees: dict[str, ttk.Treeview] = {}
+
+        def make_movers_table(parent, title: str) -> ttk.Treeview:
+            card = tk.Frame(parent, bg='#151821', bd=0, highlightthickness=1, highlightbackground='#242b38')
+            card.pack(side=tk.LEFT, fill=tk.BOTH, expand=1, padx=6)
+            tk.Label(
+                card,
+                text=title,
+                font=("Segoe UI", 11, "bold"),
+                bg='#151821',
+                fg=DEEP_SEA_THEME['text_primary']
+            ).pack(anchor='w', padx=12, pady=(10, 4))
+            tree = ttk.Treeview(card, columns=('symbol', 'price', 'percent'), show='headings', height=10)
+            tree.heading('symbol', text='Symbol', anchor='w')
+            tree.column('symbol', anchor='w', width=80, stretch=False)
+            tree.heading('price', text='Last', anchor='e')
+            tree.column('price', anchor='e', width=90, stretch=True)
+            tree.heading('percent', text='Δ%', anchor='e')
+            tree.column('percent', anchor='e', width=90, stretch=True)
+            vsb = ttk.Scrollbar(card, orient=tk.VERTICAL, command=tree.yview)
+            tree.configure(yscrollcommand=vsb.set)
+            tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=1, padx=(12, 0), pady=(0, 12))
+            vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 12), pady=(0, 12))
+            return tree
+
+        for label, scr_id in MARKET_MOVERS_SCREENS:
+            tree = make_movers_table(movers_grid, label)
+            list_trees[label] = tree
+
+        world_section = tk.Frame(markets_frame, bg=DEEP_SEA_THEME['primary_bg'])
+        world_section.pack(fill=tk.BOTH, expand=0, padx=24, pady=(0, 24))
+
+        tk.Label(
+            world_section,
+            text="World indices ›",
+            font=("Segoe UI", 15, "bold"),
+            bg=DEEP_SEA_THEME['primary_bg'],
+            fg=DEEP_SEA_THEME['text_primary']
+        ).pack(anchor='w', pady=(0, 8))
+
+        world_cards_frame = tk.Frame(world_section, bg=DEEP_SEA_THEME['primary_bg'])
+        world_cards_frame.pack(fill=tk.BOTH, expand=1)
+
+        world_widgets: dict[str, dict[str, tk.Label]] = {}
+
+        columns = 3
+        for idx, (name, symbol, subtitle) in enumerate(WORLD_INDEX_SYMBOLS):
+            card = tk.Frame(
+                world_cards_frame,
+                bg='#151821',
+                bd=0,
+                highlightthickness=1,
+                highlightbackground='#242b38',
+                padx=14,
+                pady=12
+            )
+            r = idx // columns
+            c = idx % columns
+            card.grid(row=r, column=c, padx=8, pady=8, sticky='nsew')
+            world_cards_frame.grid_columnconfigure(c, weight=1)
+
+            name_lbl = tk.Label(card, text=name, font=("Segoe UI", 11, "bold"), bg='#151821', fg=DEEP_SEA_THEME['text_primary'])
+            name_lbl.pack(anchor='w')
+            subtitle_lbl = tk.Label(card, text=subtitle, font=("Segoe UI", 9), bg='#151821', fg=DEEP_SEA_THEME['text_secondary'])
+            subtitle_lbl.pack(anchor='w', pady=(0, 6))
+            price_lbl = tk.Label(card, text='—', font=("Segoe UI", 13, "bold"), bg='#151821', fg=DEEP_SEA_THEME['text_primary'])
+            price_lbl.pack(anchor='w')
+            percent_lbl = tk.Label(card, text='—', font=("Segoe UI", 10, "bold"), bg='#151821', fg=DEEP_SEA_THEME['text_secondary'])
+            percent_lbl.pack(anchor='w', pady=(2, 0))
+
+            world_widgets[symbol] = {
+                'frame': card,
+                'price': price_lbl,
+                'percent': percent_lbl,
+            }
+
+        def fmt_price(value):
+            return f"{value:,.2f}" if isinstance(value, (float, int)) else "—"
+
+        def fmt_change(value):
+            return f"{value:+,.2f}" if isinstance(value, (float, int)) else "—"
+
+        def fmt_percent(value):
+            return f"{value:+.2f}%" if isinstance(value, (float, int)) else "—"
+
+        def colorize_change(label: tk.Label, value: float | None) -> None:
+            if value is None:
+                label.configure(fg=DEEP_SEA_THEME['text_secondary'])
+            elif value >= 0:
+                label.configure(fg=DEEP_SEA_THEME['success'])
+            else:
+                label.configure(fg=DEEP_SEA_THEME['danger'])
+
+        def refresh_major_cards(quotes: dict[str, dict[str, Any]]):
+            for info in MAJOR_INDEX_CARDS:
+                widget = major_widgets.get(info['symbol'])
+                if not widget:
+                    continue
+                data = quotes.get(info['symbol'], {})
+                price = data.get('regularMarketPrice')
+                percent = data.get('regularMarketChangePercent')
+                change = data.get('regularMarketChange')
+                widget['price'].configure(text=fmt_price(price))
+                txt = f"{fmt_change(change)}  {fmt_percent(percent)}" if percent is not None else fmt_change(change)
+                widget['change'].configure(text=txt)
+                colorize_change(widget['change'], percent if percent is not None else change)
+
+        def refresh_world_cards(quotes: dict[str, dict[str, Any]]):
+            for _, symbol, _subtitle in WORLD_INDEX_SYMBOLS:
+                widget = world_widgets.get(symbol)
+                if not widget:
+                    continue
+                data = quotes.get(symbol, {})
+                price = data.get('regularMarketPrice')
+                percent = data.get('regularMarketChangePercent')
+                widget['price'].configure(text=fmt_price(price))
+                widget['percent'].configure(text=fmt_percent(percent))
+                colorize_change(widget['percent'], percent)
+
+        def populate_movers(label: str, scr_id: str):
+            rows = fetch_predefined_screener(scr_id, count=20)
+            tree = list_trees[label]
+            tree.delete(*tree.get_children())
+            if not rows:
+                tree.insert('', 'end', values=("—", "—", "—"))
+                return
+            for entry in rows[:20]:
+                symbol = entry.get('symbol', '—')
+                price = entry.get('regularMarketPrice')
+                percent = entry.get('regularMarketChangePercent')
+                tree.insert('', 'end', values=(symbol, fmt_price(price), fmt_percent(percent)))
+
+        def on_tree_double_click(event):
+            tree = event.widget
+            selection = tree.selection()
+            if not selection:
+                return
+            symbol = tree.item(selection[0], 'values')[0]
+            if not symbol or symbol == '—':
+                return
+            open_stock_layout_with_symbol(symbol)
+
+        for tree in list_trees.values():
+            tree.bind('<Double-1>', on_tree_double_click)
+
+        def refresh_all():
+            symbols = {info['symbol'] for info in MAJOR_INDEX_CARDS}
+            symbols.update(symbol for _, symbol, _ in WORLD_INDEX_SYMBOLS)
+            quotes = fetch_multi_quotes(list(symbols))
+            refresh_major_cards(quotes)
+            refresh_world_cards(quotes)
+            for label, scr_id in MARKET_MOVERS_SCREENS:
+                populate_movers(label, scr_id)
+            update_timeframe_buttons()
+            draw_index_chart()
+            status_var.set(f"Last updated {datetime.now().strftime('%I:%M %p')}")
+
+        refresh_btn.configure(command=refresh_all)
+        refresh_all()
+
     def create_trading_interface(symbol, ticker, prev_close, latest_close, percent_gain, ta_signal, rsi_val, analysis):
         # Home button bar (without AI panel)
         top_control_bar = tk.Frame(main_content, bg=DEEP_SEA_THEME['secondary_bg'], height=40)
@@ -4421,6 +5695,37 @@ def main_tabbed_chart():
             padx=15
         )
         home_btn.pack(side=tk.LEFT, padx=10, pady=5)
+
+        # Chart width slider state (percentage of the main pane)
+        chart_width_var = tk.DoubleVar(value=72.0)
+        chart_width_display_var = tk.StringVar(value="72%")
+
+        chart_space_frame = tk.Frame(top_control_bar, bg=DEEP_SEA_THEME['secondary_bg'])
+        chart_space_frame.pack(side=tk.LEFT, padx=12, pady=5)
+
+        tk.Label(
+            chart_space_frame,
+            text="Chart width",
+            font=("Segoe UI", 9, "bold"),
+            bg=DEEP_SEA_THEME['secondary_bg'],
+            fg=DEEP_SEA_THEME['text_secondary']
+        ).pack(anchor="w")
+
+        tk.Label(
+            chart_space_frame,
+            textvariable=chart_width_display_var,
+            font=("Segoe UI", 9),
+            bg=DEEP_SEA_THEME['secondary_bg'],
+            fg=DEEP_SEA_THEME['text_secondary']
+        ).pack(anchor="e")
+
+        chart_width_scale = ttk.Scale(
+            chart_space_frame,
+            from_=55.0,
+            to=92.0,
+            variable=chart_width_var
+        )
+        chart_width_scale.pack(fill=tk.X, expand=1)
 
         # New Window button on the right (multi-instance)
         new_window_btn2 = tk.Button(
@@ -4447,12 +5752,17 @@ def main_tabbed_chart():
             background=DEEP_SEA_THEME['surface_bg'],
             foreground=DEEP_SEA_THEME['text_primary'],
             font=("Segoe UI", 13, "bold"),
-            padding=[24, 12],
+            padding=[BASE_TAB_PADDING, 16],
             borderwidth=1
         )
         style.map("TNotebook.Tab",
             background=[("selected", DEEP_SEA_THEME['info']), ("active", DEEP_SEA_THEME['active'])],
-            foreground=[("selected", DEEP_SEA_THEME['text_primary']), ("active", DEEP_SEA_THEME['primary_bg'])]
+            foreground=[("selected", DEEP_SEA_THEME['text_primary']), ("active", DEEP_SEA_THEME['primary_bg'])],
+            padding=[
+                ("!selected", [BASE_TAB_PADDING, 16]),
+                ("selected", [BASE_TAB_PADDING, 16]),
+                ("active", [BASE_TAB_PADDING, 16]),
+            ]
         )
         style.configure("TFrame", background=DEEP_SEA_THEME['secondary_bg'])
         style.configure("TLabel", background=DEEP_SEA_THEME['secondary_bg'], foreground=DEEP_SEA_THEME['text_primary'], font=("Segoe UI", 12))
@@ -4461,6 +5771,12 @@ def main_tabbed_chart():
             background=[("active", DEEP_SEA_THEME['info'])],
             foreground=[("active", DEEP_SEA_THEME['text_primary'])]
         )
+
+        style.layout("HiddenNotebook.TNotebook", [
+            ('Notebook.client', {'sticky': 'nswe'})
+        ])
+        style.configure("HiddenNotebook.TNotebook", background=DEEP_SEA_THEME['secondary_bg'], borderwidth=0)
+        style.layout("HiddenNotebook.TNotebook.Tab", [])
 
         # --- Paned window to allow user to resize chart area vs side panel ---
         paned = tk.PanedWindow(main_content, orient=tk.HORIZONTAL, sashwidth=6, bd=0, relief='flat', bg=DEEP_SEA_THEME['primary_bg'])
@@ -4473,30 +5789,308 @@ def main_tabbed_chart():
         paned.add(left_area)
         paned.add(side_area)
 
-        notebook = ttk.Notebook(left_area, style="TNotebook")
+        slider_state = {'updating': False, 'applying': False}
+        MIN_CHART_WIDTH = 420
+        MIN_SIDE_WIDTH = 220
+
+        def clamp_chart_ratio(ratio: float, total: int | None = None) -> float:
+            if total is None or total <= 0:
+                total = paned.winfo_width()
+            if total <= 0:
+                return ratio
+            min_ratio = max(MIN_CHART_WIDTH / total, 0.55)
+            max_ratio = min(0.92, 1.0 - (MIN_SIDE_WIDTH / total))
+            if max_ratio <= min_ratio:
+                max_ratio = min_ratio
+            return max(min_ratio, min(max_ratio, ratio))
+
+        def sync_slider_to_ratio(ratio: float) -> None:
+            slider_state['updating'] = True
+            chart_width_var.set(round(ratio * 100, 1))
+            chart_width_display_var.set(f"{ratio * 100:.0f}%")
+            slider_state['updating'] = False
+
+        def set_chart_ratio(ratio: float, from_slider: bool = False) -> None:
+            total = paned.winfo_width()
+            if total <= 0:
+                paned.after(50, lambda r=ratio, fs=from_slider: set_chart_ratio(r, fs))
+                return
+            ratio = clamp_chart_ratio(ratio, total)
+            target_left = int(total * ratio)
+            slider_state['applying'] = True
+            try:
+                paned.sash_place(0, target_left, 0)
+            except Exception:
+                slider_state['applying'] = False
+                return
+            paned._chart_ratio = ratio
+            if from_slider:
+                slider_state['updating'] = True
+                chart_width_var.set(ratio * 100)
+                slider_state['updating'] = False
+                chart_width_display_var.set(f"{ratio * 100:.0f}%")
+            else:
+                sync_slider_to_ratio(ratio)
+            slider_state['applying'] = False
+
+        def on_chart_width_change(value: str) -> None:
+            if slider_state['updating']:
+                return
+            try:
+                ratio = float(value) / 100.0
+            except (TypeError, ValueError):
+                return
+            set_chart_ratio(ratio, from_slider=True)
+
+        def ensure_paned_ratio(_event=None) -> None:
+            if slider_state['applying']:
+                return
+            total = paned.winfo_width()
+            if total <= 0:
+                return
+            desired = getattr(paned, "_chart_ratio", chart_width_var.get() / 100.0)
+            desired = clamp_chart_ratio(desired, total)
+            try:
+                current_left = paned.sash_coord(0)[0]
+            except Exception:
+                current_left = int(total * desired)
+            current_ratio = current_left / total if total else desired
+            if abs(current_ratio - desired) > 0.01:
+                set_chart_ratio(desired)
+            else:
+                paned._chart_ratio = desired
+                sync_slider_to_ratio(desired)
+
+        def capture_sash_ratio(_event=None) -> None:
+            if slider_state['applying']:
+                return
+            total = paned.winfo_width()
+            if total <= 0:
+                return
+            try:
+                current_left = paned.sash_coord(0)[0]
+            except Exception:
+                return
+            ratio = clamp_chart_ratio(current_left / total, total)
+            set_chart_ratio(ratio)
+
+        chart_width_scale.configure(command=on_chart_width_change)
+        paned._chart_ratio = chart_width_var.get() / 100.0
+        paned.bind("<Configure>", ensure_paned_ratio, add="+")
+        paned.bind("<ButtonRelease-1>", capture_sash_ratio, add="+")
+        paned.after(150, ensure_paned_ratio)
+
+        notebook = ttk.Notebook(left_area, style="HiddenNotebook.TNotebook")
+
+        tabs_header = tk.Frame(left_area, bg=DEEP_SEA_THEME['secondary_bg'])
+        tabs_header.pack(fill=tk.X, padx=0, pady=(0, 4))
+
+        tab_bar_container = tk.Frame(tabs_header, bg=DEEP_SEA_THEME['secondary_bg'])
+        tab_bar_container.pack(side=tk.LEFT, fill=tk.X, expand=1)
+
+        add_tab_btn = tk.Button(
+            tabs_header,
+            text="Add Tab +",
+            font=("Segoe UI", 10, "bold"),
+            bg=DEEP_SEA_THEME['surface_bg'],
+            fg=DEEP_SEA_THEME['text_primary'],
+            activebackground=DEEP_SEA_THEME['hover'],
+            activeforeground=DEEP_SEA_THEME['text_primary'],
+            bd=1,
+            relief="raised",
+            padx=10,
+            pady=2
+        )
+        add_tab_btn.pack(side=tk.RIGHT, padx=4, pady=2)
+
         notebook.pack(fill=tk.BOTH, expand=1, padx=0, pady=0)
 
-        # Simple header bar with a plus button to go to startup Home page
-        tabs_header = tk.Frame(left_area, bg=DEEP_SEA_THEME['secondary_bg'])
-        def go_to_startup_home():
-            # Redirect to the main startup Home page (outside of tabs)
-            create_home_page()
-        plus_btn = tk.Button(
-            tabs_header, text="+", command=go_to_startup_home, width=3,
-            font=("Segoe UI", 12, "bold"),
-            bg=DEEP_SEA_THEME['surface_bg'], fg=DEEP_SEA_THEME['text_primary'],
-            activebackground=DEEP_SEA_THEME['hover'], activeforeground=DEEP_SEA_THEME['text_primary'],
-            bd=1, relief="raised"
-        )
-        plus_btn.pack(side=tk.RIGHT, padx=6, pady=2)
-        # Pack header before the notebook so it appears above the tabs row
-        tabs_header.pack(fill=tk.X, padx=0, pady=(0, 2), before=notebook)
+        TAB_BUTTON_WIDTH = 168
+
+        tab_button_frames: dict[str, tk.Frame] = {}
+        tab_button_labels: dict[str, tk.Label] = {}
+        tab_button_close: dict[str, tk.Label] = {}
+        tab_order: list[str] = []
+
+        def format_tab_title(raw: str) -> str:
+            base = (raw or "").upper()
+            max_chars = 11
+            if len(base) > max_chars:
+                base = base[: max_chars - 1] + '…'
+            return base
+
+        def update_tab_highlight() -> None:
+            current = notebook.select()
+            for tab_id, frame_btn in tab_button_frames.items():
+                is_active = (tab_id == current)
+                bg = DEEP_SEA_THEME['info'] if is_active else DEEP_SEA_THEME['surface_bg']
+                fg = DEEP_SEA_THEME['text_primary'] if is_active else DEEP_SEA_THEME['text_secondary']
+                border = DEEP_SEA_THEME['accent_bg'] if is_active else DEEP_SEA_THEME['border']
+                frame_btn.configure(bg=bg, highlightbackground=border)
+                tab_button_labels[tab_id].configure(bg=bg, fg=fg)
+                tab_button_close[tab_id].configure(bg=bg, fg=fg)
+
+        def normalize_tab_id(tab_target) -> str | None:
+            try:
+                idx = notebook.index(tab_target)
+                tabs = notebook.tabs()
+                if 0 <= idx < len(tabs):
+                    return tabs[idx]
+            except Exception:
+                pass
+            tab_str = str(tab_target)
+            if tab_str in tab_button_frames:
+                return tab_str
+            tabs = notebook.tabs()
+            if tab_str in tabs:
+                return tab_str
+            return None
+
+        def remove_tab_button(tab_id: str) -> None:
+            frame_btn = tab_button_frames.pop(tab_id, None)
+            if frame_btn is not None:
+                frame_btn.destroy()
+            tab_button_labels.pop(tab_id, None)
+            tab_button_close.pop(tab_id, None)
+            if tab_id in tab_order:
+                tab_order.remove(tab_id)
+
+        def select_tab(tab_id: str) -> None:
+            try:
+                notebook.select(tab_id)
+            except Exception:
+                pass
+            update_tab_highlight()
+
+        def close_tab(tab_id: str) -> None:
+            try:
+                notebook.forget(tab_id)
+            except Exception:
+                return
+
+        def register_tab_button(tab_widget, title: str) -> None:
+            tab_id = normalize_tab_id(tab_widget)
+            if tab_id is None:
+                return
+            if tab_id in tab_button_frames:
+                tab_button_labels[tab_id].config(text=format_tab_title(title))
+                update_tab_highlight()
+                return
+
+            btn_frame = tk.Frame(
+                tab_bar_container,
+                width=TAB_BUTTON_WIDTH,
+                height=34,
+                bg=DEEP_SEA_THEME['surface_bg'],
+                highlightbackground=DEEP_SEA_THEME['border'],
+                highlightthickness=1,
+                bd=0,
+            )
+            btn_frame.pack(side=tk.LEFT, padx=4, pady=2)
+            btn_frame.pack_propagate(False)
+
+            text_label = tk.Label(
+                btn_frame,
+                text=format_tab_title(title),
+                anchor='w',
+                font=("Segoe UI", 11, "bold"),
+                bg=DEEP_SEA_THEME['surface_bg'],
+                fg=DEEP_SEA_THEME['text_secondary']
+            )
+            text_label.pack(side=tk.LEFT, fill=tk.BOTH, expand=1, padx=(10, 4))
+
+            close_label = tk.Label(
+                btn_frame,
+                text='✕',
+                font=("Segoe UI", 11, "bold"),
+                bg=DEEP_SEA_THEME['surface_bg'],
+                fg=DEEP_SEA_THEME['text_secondary'],
+                cursor='hand2'
+            )
+            close_label.pack(side=tk.RIGHT, padx=(0, 10))
+
+            def _select(_event=None, tab_key=tab_id):
+                select_tab(tab_key)
+                return "break"
+
+            def _close(_event=None, tab_key=tab_id):
+                close_tab(tab_key)
+                return "break"
+
+            for widget in (btn_frame, text_label):
+                widget.bind('<Button-1>', _select)
+            close_label.bind('<Button-1>', _close)
+
+            tab_button_frames[tab_id] = btn_frame
+            tab_button_labels[tab_id] = text_label
+            tab_button_close[tab_id] = close_label
+            tab_order.append(tab_id)
+            update_tab_highlight()
+
+        original_forget = notebook.forget
+
+        def forget_override(tab_target):
+            tab_id_normalized = normalize_tab_id(tab_target)
+            if tab_id_normalized is not None:
+                remove_tab_button(tab_id_normalized)
+            result = original_forget(tab_target)
+            ensure_hook = getattr(notebook, '_ensure_plus_tab', None)
+            if callable(ensure_hook):
+                ensure_hook()
+            update_tab_highlight()
+            return result
+
+        notebook.forget = forget_override  # type: ignore
+
+        def add_tab_action():
+            prompt_fn = getattr(notebook, '_prompt_add_tab', None)
+            if callable(prompt_fn):
+                prompt_fn()
+
+        add_tab_btn.configure(command=add_tab_action)
+
+        notebook._register_tab_button = register_tab_button
+        notebook._update_tab_highlight = update_tab_highlight
+
+        def _real_tab_ids() -> list[str]:
+            plus_tab_obj = getattr(notebook, "_plus_tab", None)
+            plus_id = str(plus_tab_obj) if plus_tab_obj is not None else None
+            return [tab_id for tab_id in notebook.tabs() if plus_id is None or tab_id != plus_id]
+
+        def tab_limit_reached() -> bool:
+            return len(_real_tab_ids()) >= MAX_TABS
+
+        def update_tab_style() -> None:
+            style.configure("TNotebook.Tab", padding=[BASE_TAB_PADDING, 16])
+
+        notebook._update_tab_style = update_tab_style
+        notebook._tab_limit_reached = tab_limit_reached
+        notebook._real_tab_ids_fn = _real_tab_ids
 
         # Expose notebook globally for adding News/Heatmap tabs from elsewhere
         global GLOBAL_NOTEBOOK
         GLOBAL_NOTEBOOK = notebook
 
-        show_chart_with_points(symbol, ticker, prev_close, latest_close, percent_gain, ta_signal, rsi_val, analysis, notebook, symbol)
+        first_frame = show_chart_with_points(
+            symbol,
+            ticker,
+            prev_close,
+            latest_close,
+            percent_gain,
+            ta_signal,
+            rsi_val,
+            analysis,
+            notebook,
+            symbol,
+        )
+        ensure_fn = getattr(notebook, "_ensure_plus_tab", None)
+        style_fn = getattr(notebook, "_update_tab_style", None)
+        if callable(ensure_fn):
+            ensure_fn()
+        if callable(style_fn):
+            style_fn()
+        if first_frame is not None:
+            notebook._last_real_tab = str(first_frame)
 
         side_panel = tk.Frame(side_area, bg=DEEP_SEA_THEME['secondary_bg'], bd=0, highlightthickness=0)
         side_panel.pack(fill=tk.BOTH, expand=1)
@@ -4553,14 +6147,19 @@ def main_tabbed_chart():
                 frame.pack(fill=tk.BOTH, expand=1)
                 panel_states[key] = True
                 try:
-                    if default_sash_pos[0] is None:
-                        default_sash_pos[0] = paned.sash_coord(0)[0]
                     total = paned.winfo_width()
                     if total <= 0:
                         paned.update_idletasks()
                         total = paned.winfo_width()
-                    new_left = max(420, int(total * 0.45))
-                    paned.sash_place(0, new_left, 0)
+                    if total > 0 and default_sash_pos[0] is None:
+                        try:
+                            current_left = paned.sash_coord(0)[0]
+                        except Exception:
+                            current_left = int(total * getattr(paned, "_chart_ratio", chart_width_var.get() / 100.0))
+                        default_sash_pos[0] = clamp_chart_ratio(current_left / total, total)
+                    if total > 0:
+                        target_ratio = clamp_chart_ratio(max(420 / total, 0.45), total)
+                        set_chart_ratio(target_ratio)
                 except Exception:
                     pass
             else:
@@ -4568,7 +6167,7 @@ def main_tabbed_chart():
                 show_panel(key)
                 try:
                     if default_sash_pos[0] is not None:
-                        paned.sash_place(0, default_sash_pos[0], 0)
+                        set_chart_ratio(default_sash_pos[0])
                 except Exception:
                     pass
             update_expand_icons()
@@ -4584,29 +6183,98 @@ def main_tabbed_chart():
         wl_expand.pack(side=tk.RIGHT, padx=6)
         expand_buttons['watchlist'] = wl_expand
 
-        watchlist_listbox = tk.Listbox(
-            watchlist_frame, bg=DEEP_SEA_THEME['accent_bg'], fg=DEEP_SEA_THEME['text_primary'], font=("Segoe UI", 12, "bold"),
-            selectbackground=DEEP_SEA_THEME['info'], selectforeground=DEEP_SEA_THEME['text_primary'], activestyle="none", width=18, bd=1, highlightthickness=0, relief="solid"
+        watchlist_style = ttk.Style()
+        try:
+            watchlist_style.theme_use('clam')
+        except Exception:
+            pass
+        tree_style = 'Watchlist.Treeview'
+        watchlist_style.configure(
+            tree_style,
+            background=DEEP_SEA_THEME['accent_bg'],
+            fieldbackground=DEEP_SEA_THEME['accent_bg'],
+            foreground=DEEP_SEA_THEME['text_primary'],
+            rowheight=26,
+            bordercolor=DEEP_SEA_THEME['border'],
+            borderwidth=0,
+            relief='flat'
         )
-        watchlist_listbox.pack(fill=tk.BOTH, expand=1, padx=8, pady=5)
+        heading_style = 'Watchlist.Treeview.Heading'
+        watchlist_style.configure(
+            heading_style,
+            background=DEEP_SEA_THEME['surface_bg'],
+            foreground=DEEP_SEA_THEME['text_accent'],
+            font=(PRIMARY_FONT_FAMILY, 10, 'bold'),
+            bordercolor=DEEP_SEA_THEME['border'],
+            borderwidth=0
+        )
+        selection_bg = THEME_META.get('ui_states', {}).get('selection_bg', DEEP_SEA_THEME['accent_bg'])
+        selection_fg = THEME_META.get('ui_states', {}).get('selection_fg', DEEP_SEA_THEME['text_primary'])
+        watchlist_style.map(
+            tree_style,
+            background=[('selected', selection_bg)],
+            foreground=[('selected', selection_fg)]
+        )
+
+        watchlist_columns = ('symbol', 'last', 'change')
+        tree_container = tk.Frame(watchlist_frame, bg=DEEP_SEA_THEME['secondary_bg'])
+        tree_container.pack(fill=tk.BOTH, expand=1, padx=8, pady=(5, 2))
+
+        watchlist_tree = ttk.Treeview(
+            tree_container,
+            columns=watchlist_columns,
+            show='headings',
+            style=tree_style,
+            selectmode='browse'
+        )
+        watchlist_tree.heading('symbol', text='SYMBOL', anchor='w')
+        watchlist_tree.heading('last', text='LAST', anchor='center')
+        watchlist_tree.heading('change', text='Δ%', anchor='center')
+        watchlist_tree.column('symbol', width=108, minwidth=96, anchor='w', stretch=True)
+        watchlist_tree.column('last', width=78, minwidth=70, anchor='e', stretch=False)
+        watchlist_tree.column('change', width=68, minwidth=60, anchor='e', stretch=False)
+        watchlist_tree.tag_configure('positive', foreground=DEEP_SEA_THEME['success'])
+        watchlist_tree.tag_configure('negative', foreground=DEEP_SEA_THEME['danger'])
+        watchlist_tree.tag_configure('neutral', foreground=DEEP_SEA_THEME['text_secondary'])
+
+        watch_scroll = ttk.Scrollbar(tree_container, orient='vertical', command=watchlist_tree.yview)
+        watchlist_tree.configure(yscrollcommand=watch_scroll.set)
+        watchlist_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+        watch_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         def add_to_watchlist():
             try:
-                symbol_input = simpledialog.askstring("Add to Watchlist", "Enter the stock ticker symbol (e.g., MSFT):", parent=root)
-                if not symbol_input:
-                    return
-                symbol_input = symbol_input.strip().upper()
-                symbol_input = re.sub(r'[^A-Z0-9\.\-]', '', symbol_input)
-                if not symbol_input:
-                    messagebox.showerror("Error", "Please enter a valid ticker symbol.")
-                    return
-                watchlist = load_watchlist()
-                if symbol_input not in watchlist:
-                    watchlist.append(symbol_input)
-                    save_watchlist(watchlist)
-                    update_watchlist_listbox(force_update=True)
-                else:
-                    messagebox.showinfo("Info", f"{symbol_input} is already in your watchlist.")
+                while True:
+                    symbol_input = simpledialog.askstring("Add to Watchlist", "Enter the stock ticker symbol (e.g., MSFT):", parent=root)
+                    if not symbol_input:
+                        return
+                    symbol_input = symbol_input.strip().upper()
+                    symbol_input = re.sub(r'[^A-Z0-9\.\-]', '', symbol_input)
+                    if not symbol_input:
+                        messagebox.showerror("Error", "Please enter a valid ticker symbol.")
+                        continue
+                    
+                    # Validate the stock symbol
+                    if not validate_stock_symbol(symbol_input):
+                        result = messagebox.askyesno(
+                            "Invalid Stock Symbol", 
+                            f"'{symbol_input}' is not a valid stock symbol. No market data could be found.\n\nWould you like to try another symbol?",
+                            parent=root
+                        )
+                        if not result:
+                            return
+                        continue
+                    
+                    watchlist = load_watchlist()
+                    if symbol_input not in watchlist:
+                        watchlist.append(symbol_input)
+                        save_watchlist(watchlist)
+                        update_watchlist_listbox(force_update=True)
+                        messagebox.showinfo("Success", f"{symbol_input} has been added to your watchlist.")
+                        break
+                    else:
+                        messagebox.showinfo("Info", f"{symbol_input} is already in your watchlist.")
+                        break
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to add to watchlist: {e}")
 
@@ -4615,7 +6283,7 @@ def main_tabbed_chart():
             font=("Segoe UI", 10, "bold"), bg=DEEP_SEA_THEME['success'], fg=DEEP_SEA_THEME['text_primary'],
             activebackground=DEEP_SEA_THEME['active'], activeforeground=DEEP_SEA_THEME['primary_bg'], bd=2, highlightthickness=0, relief="raised"
         )
-        add_watch_btn.pack(pady=(0, 10), fill=tk.X, padx=8)
+        add_watch_btn.pack(fill=tk.X, padx=12, pady=(0, 10))
 
         watchlist_cache = {}
         last_watchlist_update = 0
@@ -4626,37 +6294,107 @@ def main_tabbed_chart():
             if not force_update and current_time - last_watchlist_update < 30:
                 return
             try:
-                watchlist_listbox.delete(0, tk.END)
+                watchlist_tree.delete(*watchlist_tree.get_children())
                 watchlist = load_watchlist()
+                if not watchlist:
+                    watchlist = DEFAULT_WATCHLIST
                 for symbol_item in watchlist:
-                    if not force_update and symbol_item in watchlist_cache and current_time - watchlist_cache[symbol_item]['time'] < 60:
-                        percent = watchlist_cache[symbol_item]['percent']
+                    cached = watchlist_cache.get(symbol_item)
+                    use_cache = cached and not force_update and current_time - cached.get('time', 0) < 60
+                    if use_cache:
+                        price = cached.get('price')
+                        percent = cached.get('percent')
                     else:
+                        price = MARKET_DATA_PROVIDER.get_last_price(symbol_item)
+                        if price is None:
+                            try:
+                                hist = MARKET_DATA_PROVIDER.get_history(symbol_item, period="5d")
+                                if not hist.empty:
+                                    price = float(hist['Close'].iloc[-1])
+                            except Exception:
+                                price = None
                         gp = globals().get('get_percent_gain')
                         percent = gp(symbol_item) if callable(gp) else None
-                        watchlist_cache[symbol_item] = {'percent': percent, 'time': current_time}
+                        watchlist_cache[symbol_item] = {'percent': percent, 'price': price, 'time': current_time}
+
+                    price_str = f"{price:,.2f}" if price is not None else "—"
                     if percent is not None:
-                        percent_str = f"{percent:+.1f}%"
-                        color = DEEP_SEA_THEME['success'] if percent >= 0 else DEEP_SEA_THEME['danger']
+                        percent_str = f"{percent:+.2f}%"
+                        tag = 'positive' if percent >= 0 else 'negative'
                     else:
-                        percent_str = "N/A"
-                        color = DEEP_SEA_THEME['text_secondary']
-                    watchlist_listbox.insert(tk.END, f"{symbol_item} {percent_str}")
-                    idx = watchlist_listbox.size() - 1
-                    watchlist_listbox.itemconfig(idx, foreground=color)
+                        percent_str = "—"
+                        tag = 'neutral'
+                    watchlist_tree.insert('', 'end', values=(symbol_item, price_str, percent_str), tags=(tag,))
+                if not watchlist_tree.get_children():
+                    watchlist_tree.insert('', 'end', values=('Watchlist empty', '—', '—'), tags=('neutral',))
                 last_watchlist_update = current_time
-            except Exception:
-                pass
+            except Exception as watch_err:
+                logging.debug("Watchlist refresh failed: %s", watch_err)
+                watchlist_tree.delete(*watchlist_tree.get_children())
+                watchlist_tree.insert('', 'end', values=('Watchlist unavailable', '—', '—'), tags=('neutral',))
 
         def on_watchlist_double_click(event):
-            selection = watchlist_listbox.curselection()
-            if not selection:
+            item_id = watchlist_tree.focus()
+            if not item_id:
                 return
-            idx = selection[0]
-            selected_symbol = load_watchlist()[idx]
-            open_stock_layout_with_symbol(selected_symbol)
+            values = watchlist_tree.item(item_id, 'values')
+            if not values:
+                return
+            selected_symbol = values[0]
+            if selected_symbol and selected_symbol not in {'Watchlist empty', 'Watchlist unavailable'}:
+                open_fn = getattr(notebook, '_open_symbol_tab', None)
+                limit_fn = getattr(notebook, '_tab_limit_reached', None)
+                limit_hit = limit_fn() if callable(limit_fn) else False
+                opened = open_fn(selected_symbol) if callable(open_fn) and not limit_hit else False
+                if not opened and not limit_hit:
+                    open_stock_layout_with_symbol(selected_symbol)
 
-        watchlist_listbox.bind("<Double-Button-1>", on_watchlist_double_click)
+        def on_watchlist_left_click(event):
+            item_id = watchlist_tree.focus()
+            if not item_id:
+                return
+            values = watchlist_tree.item(item_id, 'values')
+            if not values:
+                return
+            selected_symbol = values[0]
+            if selected_symbol and selected_symbol not in {'Watchlist empty', 'Watchlist unavailable'}:
+                # Show context menu with delete option
+                context_menu = tk.Menu(root, tearoff=0, bg=DEEP_SEA_THEME['secondary_bg'], 
+                                     fg=DEEP_SEA_THEME['text_primary'], font=("Segoe UI", 10))
+                
+                def delete_from_watchlist():
+                    result = messagebox.askyesno(
+                        "Delete from Watchlist", 
+                        f"Are you sure you want to remove '{selected_symbol}' from your watchlist?",
+                        parent=root
+                    )
+                    if result:
+                        try:
+                            watchlist = load_watchlist()
+                            if selected_symbol in watchlist:
+                                watchlist.remove(selected_symbol)
+                                save_watchlist(watchlist)
+                                update_watchlist_listbox(force_update=True)
+                                messagebox.showinfo("Success", f"{selected_symbol} has been removed from your watchlist.")
+                        except Exception as e:
+                            messagebox.showerror("Error", f"Failed to remove from watchlist: {e}")
+                
+                def open_chart():
+                    on_watchlist_double_click(event)
+                
+                context_menu.add_command(label=f"Open {selected_symbol} Chart", command=open_chart)
+                context_menu.add_separator()
+                context_menu.add_command(label=f"Delete {selected_symbol}", command=delete_from_watchlist)
+                
+                # Show context menu at mouse position
+                try:
+                    context_menu.tk_popup(event.x_root, event.y_root)
+                finally:
+                    context_menu.grab_release()
+
+        watchlist_tree.bind("<Button-1>", on_watchlist_left_click)
+        watchlist_tree.bind("<Double-Button-1>", on_watchlist_double_click)
+        watchlist_tree.bind('<Return>', on_watchlist_double_click)
         update_watchlist_listbox()
 
         # --- DOM UI ---

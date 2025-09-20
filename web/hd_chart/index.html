@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aley Trader HD Workspace</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app" class="tv-shell">
+    <aside class="tv-toolbar" aria-label="Drawing tools">
+      <button class="toolbar-btn active" data-action="cursor" title="Select">
+        <span>🖱</span>
+      </button>
+      <button class="toolbar-btn" data-action="trendline" title="Add price line">
+        <span>📈</span>
+      </button>
+      <button class="toolbar-btn" data-action="horizontal" title="Horizontal marker">
+        <span>〰️</span>
+      </button>
+      <button class="toolbar-btn" data-action="note" title="Annotation">
+        <span>📝</span>
+      </button>
+      <div class="toolbar-separator"></div>
+      <button class="toolbar-btn" data-action="reset" title="Reset layout">
+        <span>♻️</span>
+      </button>
+    </aside>
+
+    <main class="tv-main">
+      <header class="tv-header">
+        <div class="brand">
+          <span class="brand-avatar">AT</span>
+          <div>
+            <h1 class="brand-title">Aley Trader HD</h1>
+            <p class="brand-sub">Inspired by TradingView • MetaTrader precision</p>
+          </div>
+        </div>
+        <div class="symbol-summary" id="symbol-summary"></div>
+        <nav class="header-actions">
+          <button class="pill" data-overlay="ma">MA 21/50</button>
+          <button class="pill" data-overlay="bb">Bollinger</button>
+          <button class="pill" data-overlay="rsi">RSI</button>
+          <button class="pill" data-overlay="vwma">VWMA</button>
+        </nav>
+      </header>
+
+      <section class="tv-content">
+        <div class="chart-stack">
+          <div id="primary-chart" class="chart-canvas" role="img" aria-label="Price chart"></div>
+          <div id="volume-chart" class="chart-canvas" role="img" aria-label="Volume chart"></div>
+          <div id="oscillator-chart" class="chart-canvas" role="img" aria-label="Oscillator chart"></div>
+        </div>
+        <aside class="watchlist" aria-label="Watchlist">
+          <header>
+            <h2>Watchlist</h2>
+            <div class="watchlist-search">
+              <input type="search" placeholder="Search symbol" aria-label="Search watchlist" />
+            </div>
+          </header>
+          <div class="watchlist-table" id="watchlist"></div>
+        </aside>
+      </section>
+
+      <footer class="tv-footer">
+        <div class="status" id="status-strip"></div>
+        <div class="timeframes">
+          <button data-timeframe="1D">1D</button>
+          <button data-timeframe="4H">4H</button>
+          <button data-timeframe="1H">1H</button>
+          <button data-timeframe="15M">15M</button>
+          <button data-timeframe="5M">5M</button>
+        </div>
+        <div class="meta-actions">
+          <button id="export-chart">Export</button>
+          <button id="dark-light-toggle">Lights</button>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    if (!window.__INITIAL_DATA__) {
+      console.warn('Chart data not injected – fallback data will be used.');
+      window.__INITIAL_DATA__ = { symbol: 'AAPL', bars: [] };
+    }
+  </script>
+  <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

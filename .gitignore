@@ -15,3 +15,4 @@ __pycache__/
 *.log
 users.json
 user_data_emmett/
+web/hd_chart/chart_data.js
